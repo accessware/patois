@@ -4,6 +4,7 @@ version = "0.2.4"
 description = "Gettext translations for Rust desktop apps: embedded catalogs, plural rules, and language selection, with optional wxDragon integration."
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 keywords = ["i18n", "l10n", "gettext", "translation", "wxdragon"]
 categories = ["internationalization", "localization", "gui"]

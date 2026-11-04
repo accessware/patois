@@ -4,6 +4,7 @@ version = "0.2.1"
 description = "Procedural macros for patois that embed compiled gettext catalogs in a binary at compile time."
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 keywords = ["i18n", "l10n", "gettext", "translation"]
 categories = ["internationalization", "localization"]

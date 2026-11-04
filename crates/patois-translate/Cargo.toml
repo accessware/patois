@@ -4,6 +4,7 @@ version = "0.1.4"
 description = "Translate gettext catalogs and Markdown readmes with the Claude API, rejecting translations that lose placeholders, accelerators, or shortcuts."
 edition.workspace = true
 license.workspace = true
+readme.workspace = true
 repository.workspace = true
 keywords = ["i18n", "l10n", "gettext", "translation", "claude"]
 categories = ["internationalization", "localization", "development-tools"]
