@@ -1,10 +1,12 @@
 [package]
 name = "patois-build"
 version = "0.1.17"
-edition = "2024"
-description = "Build helper for patois: compiles .po translation files to .mo binaries, regenerates .pot templates, and checks translations for common mistakes."
-license = "MIT"
-keywords = ["i18n", "l10n", "build", "gettext"]
+description = "Gettext tooling for patois apps: extract strings from Rust, Swift, and Kotlin, compile .po catalogs, generate iOS and Android assets, and check translations for common mistakes."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["i18n", "l10n", "gettext", "build", "translation"]
+categories = ["internationalization", "localization", "development-tools::build-utils"]
 
 [dependencies]
 serde_json = "1.0.151"

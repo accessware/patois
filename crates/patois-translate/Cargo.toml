@@ -1,11 +1,12 @@
 [package]
 name = "patois-translate"
 version = "0.1.4"
-edition = "2024"
-description = "Machine translation of gettext catalogs and Markdown readmes through the Claude API, for patois apps."
-license = "MIT"
+description = "Translate gettext catalogs and Markdown readmes with the Claude API, rejecting translations that lose placeholders, accelerators, or shortcuts."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 keywords = ["i18n", "l10n", "gettext", "translation", "claude"]
-categories = ["localization", "internationalization", "development-tools"]
+categories = ["internationalization", "localization", "development-tools"]
 
 [dependencies]
 patois = { version = "0.2.2", path = "../patois" }

@@ -1,23 +1,22 @@
 [package]
 name = "patois"
 version = "0.2.4"
-description = "A lightweight, domain-aware i18n library for Rust desktop applications."
-edition = "2024"
-license = "MIT"
-keywords = ["i18n", "l10n", "internationalization", "localization", "gettext"]
-categories = ["localization", "internationalization"]
+description = "Gettext translations for Rust desktop apps: embedded catalogs, plural rules, and language selection, with optional wxDragon integration."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["i18n", "l10n", "gettext", "translation", "wxdragon"]
+categories = ["internationalization", "localization", "gui"]
+
+[package.metadata.docs.rs]
+features = ["ui"]
+
+[features]
+ui = ["dep:wxdragon"]
 
 [dependencies]
 inventory = "0.3.24"
 miniz_oxide = "0.9.1"
-# Pinned exactly, not `^`: `embed_domain!` expands to code naming this crate's own
-# `EmbeddedDomain` type, so a mismatched pair would fail to compile for a downstream user
-# with no version requirement to stop cargo resolving it that way.
 patois-macros = { version = "=0.2.1", path = "../patois-macros" }
 sys-locale = "0.3.2"
-# default-features = false so this does not decide for the application
-# which parts of wxWidgets get built; nothing here needs any of them.
 wxdragon = { version = "0.9.22", optional = true, default-features = false }
-
-[features]
-ui = ["dep:wxdragon"]

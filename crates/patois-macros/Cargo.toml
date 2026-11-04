@@ -1,9 +1,12 @@
 [package]
 name = "patois-macros"
 version = "0.2.1"
-description = "Proc macros for patois."
-edition = "2024"
-license = "MIT"
+description = "Procedural macros for patois that embed compiled gettext catalogs in a binary at compile time."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["i18n", "l10n", "gettext", "translation"]
+categories = ["internationalization", "localization"]
 
 [lib]
 proc-macro = true
