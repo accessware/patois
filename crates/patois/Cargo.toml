@@ -9,10 +9,10 @@ keywords = ["i18n", "l10n", "gettext", "translation", "wxdragon"]
 categories = ["internationalization", "localization", "gui"]
 
 [package.metadata.docs.rs]
-features = ["ui"]
+features = ["wx"]
 
 [features]
-ui = ["dep:wxdragon"]
+wx = ["dep:wxdragon"]
 
 [dependencies]
 inventory = "0.3.25"
