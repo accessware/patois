@@ -81,7 +81,7 @@ pub fn gen_pot(
 			continue;
 		}
 		let manifest = pkg["manifest_path"].as_str().ok_or("cargo metadata: missing manifest_path")?;
-		let src = Path::new(manifest).parent().unwrap().join("src");
+		let src = Path::new(manifest).parent().ok_or("cargo metadata: manifest_path has no parent")?.join("src");
 		// Sort each package's own files by absolute path — safe here since they all share
 		// that package's src root as a common prefix, so relative order is stable across
 		// machines even though the shared prefix itself isn't. This is what keeps the file
