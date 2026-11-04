@@ -101,7 +101,7 @@ pub fn embed_wx_translations(_input: TokenStream) -> TokenStream {
 				}
 				Self::CATALOGS
 					.iter()
-					.find(|(l, _)| *l == lang)
+					.find(|(l, _)| l.eq_ignore_ascii_case(lang))
 					.and_then(|(_, bytes)| ::patois::__inflate(bytes))
 					.map(::std::borrow::Cow::Owned)
 			}
