@@ -74,7 +74,7 @@ pub fn set_locale(locale_id: &str) {
 }
 
 /// Returns the currently active locale string.
-pub fn get_locale() -> String {
+pub fn locale() -> String {
 	registry::global().lock().unwrap().locale().to_string()
 }
 

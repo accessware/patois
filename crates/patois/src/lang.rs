@@ -1,4 +1,4 @@
-use crate::{available_locales, get_locale, registry::normalize_locale, set_locale};
+use crate::{available_locales, locale, registry::normalize_locale, set_locale};
 
 /// A language available for the app, with its code and native display name.
 #[derive(Debug, Clone)]
@@ -50,7 +50,7 @@ impl LanguageManager {
 
 	/// Returns the currently active locale code.
 	pub fn current(&self) -> String {
-		let active = get_locale();
+		let active = locale();
 		available_locales(&self.domain)
 			.into_iter()
 			.find(|code| normalize_locale(code) == active)
