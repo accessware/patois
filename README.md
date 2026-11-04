@@ -38,7 +38,7 @@ Without them, your app still builds, but with a Cargo warning and without transl
 
 This section shows the complete process for a new app named `myapp`.
 
-First, add patois to `Cargo.toml`, and mark the package as containing translatable strings:
+Add patois to `Cargo.toml`, and mark the package as containing translatable strings:
 
 ```toml
 [package.metadata.patois]
@@ -81,7 +81,7 @@ fn main() {
 
 The compiled catalogs go to `locale/`. Add `/locale` to your `.gitignore` file.
 
-To extract strings, create `examples/gen_pot.rs`:
+To extract strings, create `examples/gen_pot.rs`. Running it writes the template, `po/myapp.pot`.
 
 ```rust
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -89,36 +89,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Generate the template, `po/myapp.pot`:
-
-```sh
-cargo run --example gen_pot
-```
-
-Create a catalog for each language. For example, for German:
+Create a catalog for each language, and translate it in a text editor or a tool such as Poedit. For example, for German:
 
 ```sh
 msginit --input=po/myapp.pot --output-file=po/de.po --locale=de --no-translator
 ```
 
-Translate the strings in `po/de.po`, either in a text editor or a tool such as Poedit.
+To try a language other than your system's, call `patois::set_locale("de")` after `init_auto`.
 
-To try a language other than your system's, add the following line after the call to `init_auto`:
-
-```rust
-patois::set_locale("de");
-```
-
-Run your app:
+When your strings change, run `gen_pot` again, and then update each catalog:
 
 ```sh
-cargo run
-```
-
-When your strings change, regenerate the template, and then update each catalog:
-
-```sh
-cargo run --example gen_pot
 msgmerge --update --backup=none --no-fuzzy-matching po/de.po po/myapp.pot
 ```
 
@@ -170,7 +151,7 @@ The library and the app must use compatible versions of `patois`. Otherwise, Car
 ```rust
 let languages = patois::LanguageManager::new(env!("CARGO_PKG_NAME"));
 for language in languages.available() {
- println!("{}: {}", language.code, language.name);
+    println!("{}: {}", language.code, language.name);
 }
 if !languages.set("de") {
     eprintln!("This app has no German catalog.");
@@ -240,9 +221,7 @@ let project = Project {
 patois_translate::translate(&project, Options::default())?;
 ```
 
-Set the `ANTHROPIC_API_KEY` environment variable, and run your `xtask`.
-
-To see what a run would do without calling the API, set `Options::dry_run`.
+The API key comes from the `ANTHROPIC_API_KEY` environment variable. To see what a run would do without calling the API, set `Options::dry_run`.
 
 Each answer is checked before it's written. A translation that loses a placeholder, an accelerator, or a shortcut is skipped, and the next run tries it again. The `msgmerge` tool must be on your `PATH`.
 
@@ -300,18 +279,7 @@ If your app has iOS or Android versions, `patois-build` can keep their strings i
 
 ## Develop patois
 
-To run the tests and the lints, use the following commands. The `wx` feature builds wxWidgets, so the first build takes a while.
-
-```sh
-cargo test --workspace --all-features
-cargo clippy --workspace --all-targets --all-features
-```
-
-Formatting needs the nightly toolchain:
-
-```sh
-cargo +nightly fmt --all
-```
+The `wx` feature builds wxWidgets, so the first build with `--all-features` takes a while. Formatting needs the nightly toolchain.
 
 ## License
 
