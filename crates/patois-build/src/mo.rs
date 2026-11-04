@@ -19,6 +19,11 @@ pub fn compile_translations(po_dir: impl AsRef<Path>, locale_dir: impl AsRef<Pat
 	let domain = env::var("CARGO_PKG_NAME").unwrap_or_default();
 	println!("cargo:rerun-if-changed={}", po_dir.display());
 	println!("cargo:rerun-if-changed={}", locale_dir.display());
+	// `embed_wx_translations!` needs the profile to find catalogs, and Cargo sets it only for build
+	// scripts.
+	if let Ok(profile) = env::var("PROFILE") {
+		println!("cargo:rustc-env=PROFILE={profile}");
+	}
 	let entries = match fs::read_dir(&po_dir) {
 		Ok(e) => e,
 		Err(e) => {
