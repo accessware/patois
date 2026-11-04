@@ -15,8 +15,8 @@ features = ["ui"]
 ui = ["dep:wxdragon"]
 
 [dependencies]
-inventory = "0.3.24"
+inventory = "0.3.25"
 miniz_oxide = "0.9.1"
 patois-macros = { version = "=0.2.1", path = "../patois-macros" }
 sys-locale = "0.3.2"
-wxdragon = { version = "0.9.22", optional = true, default-features = false }
+wxdragon = { version = "0.9.24", optional = true, default-features = false }

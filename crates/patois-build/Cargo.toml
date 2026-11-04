@@ -9,4 +9,4 @@ keywords = ["i18n", "l10n", "gettext", "build", "translation"]
 categories = ["internationalization", "localization", "development-tools::build-utils"]
 
 [dependencies]
-serde_json = "1.0.151"
+serde_json = "1.0.154"
