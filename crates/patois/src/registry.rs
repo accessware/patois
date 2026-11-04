@@ -9,34 +9,29 @@ use crate::{EmbeddedDomain, catalog::Catalog};
 
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
 
-pub(crate) fn global() -> &'static Mutex<Registry> {
+pub fn global() -> &'static Mutex<Registry> {
 	REGISTRY.get_or_init(|| Mutex::new(Registry::default()))
 }
 
 #[derive(Default)]
-pub(crate) struct Registry {
-	/// App domain paths (populated by `init()`). Library domains use embedded bytes instead.
+pub struct Registry {
 	paths: HashMap<String, PathBuf>,
 	default_domain: Option<String>,
 	locale: String,
-	cache: HashMap<(String, String), Option<Catalog>>,
+	cache: HashMap<String, Option<Catalog>>,
 }
 
 impl Registry {
-	pub(crate) fn register_path(&mut self, domain: &str, path: PathBuf) {
+	pub fn register_path(&mut self, domain: &str, path: PathBuf) {
 		if self.paths.get(domain) == Some(&path) {
 			return;
 		}
-		self.cache.retain(|(_, d), _| d != domain);
+		self.cache.remove(domain);
 		self.paths.insert(domain.to_string(), path);
 	}
 
 	pub fn set_default_domain(&mut self, domain: &str) {
 		self.default_domain = Some(domain.to_string());
-	}
-
-	pub fn default_domain(&self) -> Option<&str> {
-		self.default_domain.as_deref()
 	}
 
 	pub fn set_locale(&mut self, locale_id: &str) {
@@ -51,70 +46,36 @@ impl Registry {
 		&self.locale
 	}
 
-	pub fn translate(&mut self, domain: &str, msgid: &str) -> String {
-		self.ensure_catalog(domain);
-		let key = (self.locale.clone(), domain.to_string());
-		if let Some(Some(catalog)) = self.cache.get(&key) {
-			return catalog.gettext(msgid).to_string();
-		}
-		// Fall back to the default domain when the specific domain has no catalog.
-		if let Some(default) = self.default_domain.clone()
-			&& default != domain
-		{
-			self.ensure_catalog(&default);
-			let fallback_key = (self.locale.clone(), default);
-			if let Some(Some(catalog)) = self.cache.get(&fallback_key) {
-				return catalog.gettext(msgid).to_string();
-			}
-		}
-		msgid.to_string()
+	pub fn translate(&mut self, msgid: &str) -> String {
+		self.catalog().map_or(msgid, |catalog| catalog.gettext(msgid)).to_string()
 	}
 
-	pub fn translate_plural(&mut self, domain: &str, singular: &str, plural: &str, n: u64) -> String {
-		self.ensure_catalog(domain);
-		let key = (self.locale.clone(), domain.to_string());
-		if let Some(Some(catalog)) = self.cache.get(&key) {
-			return catalog.ngettext(singular, plural, n).to_string();
+	pub fn translate_plural(&mut self, singular: &str, plural: &str, n: u64) -> String {
+		match self.catalog() {
+			Some(catalog) => catalog.ngettext(singular, plural, n),
+			None if n == 1 => singular,
+			None => plural,
 		}
-		if let Some(default) = self.default_domain.clone()
-			&& default != domain
-		{
-			self.ensure_catalog(&default);
-			let fallback_key = (self.locale.clone(), default);
-			if let Some(Some(catalog)) = self.cache.get(&fallback_key) {
-				return catalog.ngettext(singular, plural, n).to_string();
-			}
-		}
-		if n == 1 { singular.to_string() } else { plural.to_string() }
+		.to_string()
 	}
 
-	fn ensure_catalog(&mut self, domain: &str) {
-		let locale = self.locale.clone();
-		let key = (locale.clone(), domain.to_string());
-		if !self.cache.contains_key(&key) {
-			let catalog = self.load_catalog(domain, &locale);
-			self.cache.insert(key, catalog);
+	fn catalog(&mut self) -> Option<&Catalog> {
+		let domain = self.default_domain.clone()?;
+		if !self.cache.contains_key(&domain) {
+			let catalog = self.load_catalog(&domain);
+			self.cache.insert(domain.clone(), catalog);
 		}
+		self.cache.get(&domain)?.as_ref()
 	}
 
-	fn load_catalog(&self, domain: &str, locale: &str) -> Option<Catalog> {
-		for loc in locale_chain(locale) {
-			// Embedded domains (libraries using embed_domain!()) take priority.
-			for ed in inventory::iter::<EmbeddedDomain> {
-				if ed.name == domain
-					&& let Some(catalog) = embedded_catalog(ed.files, &loc)
-				{
-					return Some(catalog);
-				}
-			}
-			// Path-based domains (the app's own strings via init()).
-			if let Some(base) = self.paths.get(domain)
-				&& let Some(catalog) = catalog_on_disk(base, domain, &loc)
-			{
-				return Some(catalog);
-			}
-		}
-		None
+	fn load_catalog(&self, domain: &str) -> Option<Catalog> {
+		locale_chain(&self.locale).into_iter().find_map(|locale| {
+			inventory::iter::<EmbeddedDomain>
+				.into_iter()
+				.filter(|embedded| embedded.name == domain)
+				.find_map(|embedded| embedded_catalog(embedded.files, locale))
+				.or_else(|| catalog_on_disk(self.paths.get(domain)?, domain, locale))
+		})
 	}
 }
 
@@ -137,8 +98,8 @@ fn catalog_on_disk(base: &Path, domain: &str, locale: &str) -> Option<Catalog> {
 		})
 }
 
-/// Normalize locale strings: "en-US" and "en_us" both become "en_US".
-pub(crate) fn normalize_locale(locale: &str) -> String {
+/// Converts `en-US` and `en_us` to `en_US`, and `zh-Hans-CN` to `zh_HANS_CN`.
+pub fn normalize_locale(locale: &str) -> String {
 	let s = locale.replace('-', "_");
 	match s.split_once('_') {
 		Some((lang, region)) => format!("{}_{}", lang.to_lowercase(), region.to_uppercase()),
@@ -146,11 +107,11 @@ pub(crate) fn normalize_locale(locale: &str) -> String {
 	}
 }
 
-fn locale_chain(locale: &str) -> Vec<String> {
-	let mut chain = vec![locale.to_string()];
+fn locale_chain(locale: &str) -> Vec<&str> {
+	let mut chain = vec![locale];
 	let mut rest = locale;
 	while let Some((shorter, _)) = rest.rsplit_once('_') {
-		chain.push(shorter.to_string());
+		chain.push(shorter);
 		rest = shorter;
 	}
 	chain
@@ -181,7 +142,8 @@ mod tests {
 		assert_eq!(crate::__inflate(&miniz_oxide::deflate::compress_to_vec(&catalog, 10)), Some(catalog));
 	}
 
-	// A .mo file that was never deflated opens with its magic number, which is not a valid deflate stream, so it is skipped rather than misread.
+	// A `.mo` file opens with a magic number that isn't a valid deflate stream, so an undeflated
+	// catalog is skipped rather than misread.
 	#[test]
 	fn inflate_rejects_a_catalog_that_was_never_deflated() {
 		assert_eq!(crate::__inflate(b"\xDE\x12\x04\x95"), None);
@@ -211,9 +173,19 @@ mod tests {
 		fs::write(dir.join("app.mo"), make_mo(&[("Hello", "Olá")])).unwrap();
 		let mut registry = Registry::default();
 		registry.register_path("app", base.clone());
+		registry.set_default_domain("app");
 		registry.set_locale("pt_br");
-		let translated = registry.translate("app", "Hello");
+		let translated = registry.translate("Hello");
 		fs::remove_dir_all(&base).unwrap();
 		assert_eq!(translated, "Olá");
+	}
+
+	#[test]
+	fn nothing_is_translated_without_a_domain() {
+		let mut registry = Registry::default();
+		registry.set_locale("de");
+		assert_eq!(registry.translate("Hello"), "Hello");
+		assert_eq!(registry.translate_plural("file", "files", 1), "file");
+		assert_eq!(registry.translate_plural("file", "files", 2), "files");
 	}
 }
