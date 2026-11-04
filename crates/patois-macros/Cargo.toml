@@ -15,3 +15,6 @@ proc-macro = true
 miniz_oxide = "0.9.1"
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
+
+[lints]
+workspace = true

@@ -20,3 +20,6 @@ miniz_oxide = "0.9.1"
 patois-macros = { version = "=0.2.1", path = "../patois-macros" }
 sys-locale = "0.3.2"
 wxdragon = { version = "0.9.24", optional = true, default-features = false }
+
+[lints]
+workspace = true
