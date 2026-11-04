@@ -1,7 +1,7 @@
 use std::{
 	collections::HashMap,
-	fs::File,
-	path::PathBuf,
+	fs::{self, File},
+	path::{Path, PathBuf},
 	sync::{Mutex, OnceLock},
 };
 
@@ -101,29 +101,40 @@ impl Registry {
 		for loc in locale_chain(locale) {
 			// Embedded domains (libraries using embed_domain!()) take priority.
 			for ed in inventory::iter::<EmbeddedDomain> {
-				if ed.name == domain {
-					for (file_locale, bytes) in ed.files {
-						if *file_locale == loc
-							&& let Some(mo) = crate::__inflate(bytes)
-							&& let Ok(catalog) = Catalog::parse(mo.as_slice())
-						{
-							return Some(catalog);
-						}
-					}
-				}
-			}
-			// Path-based domains (the app's own strings via init()).
-			if let Some(base) = self.paths.get(domain) {
-				let path = base.join(&loc).join("LC_MESSAGES").join(format!("{domain}.mo"));
-				if let Ok(file) = File::open(&path)
-					&& let Ok(catalog) = Catalog::parse(file)
+				if ed.name == domain
+					&& let Some(catalog) = embedded_catalog(ed.files, &loc)
 				{
 					return Some(catalog);
 				}
 			}
+			// Path-based domains (the app's own strings via init()).
+			if let Some(base) = self.paths.get(domain)
+				&& let Some(catalog) = catalog_on_disk(base, domain, &loc)
+			{
+				return Some(catalog);
+			}
 		}
 		None
 	}
+}
+
+// Catalog directories keep whatever name a project gave them, such as `pt_br`, so both sides of
+// each comparison below go through `normalize_locale`.
+fn embedded_catalog(files: &[(&str, &[u8])], locale: &str) -> Option<Catalog> {
+	files
+		.iter()
+		.filter(|(code, _)| normalize_locale(code) == locale)
+		.find_map(|(_, deflated)| Catalog::parse(crate::__inflate(deflated)?.as_slice()).ok())
+}
+
+fn catalog_on_disk(base: &Path, domain: &str, locale: &str) -> Option<Catalog> {
+	fs::read_dir(base)
+		.ok()?
+		.flatten()
+		.filter(|entry| normalize_locale(&entry.file_name().to_string_lossy()) == locale)
+		.find_map(|entry| {
+			Catalog::parse(File::open(entry.path().join("LC_MESSAGES").join(format!("{domain}.mo"))).ok()?).ok()
+		})
 }
 
 /// Normalize locale strings: "en-US" and "en_us" both become "en_US".
@@ -145,7 +156,14 @@ fn locale_chain(locale: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+	use std::env;
+
 	use super::*;
+	use crate::catalog::tests::make_mo;
+
+	fn deflated_catalog(msgstr: &str) -> Vec<u8> {
+		miniz_oxide::deflate::compress_to_vec(&make_mo(&[("Hello", msgstr)]), 10)
+	}
 
 	#[test]
 	fn normalize_various_forms() {
@@ -170,5 +188,28 @@ mod tests {
 	fn locale_chain_expands_region() {
 		assert_eq!(locale_chain("de_DE"), vec!["de_DE", "de"]);
 		assert_eq!(locale_chain("fr"), vec!["fr"]);
+	}
+
+	#[test]
+	fn an_embedded_catalog_matches_whatever_its_directory_is_called() {
+		let deflated = deflated_catalog("Olá");
+		let files: [(&str, &[u8]); 1] = [("pt_br", &deflated)];
+		let catalog = embedded_catalog(&files, &normalize_locale("pt-BR")).unwrap();
+		assert_eq!(catalog.gettext("Hello"), "Olá");
+		assert!(embedded_catalog(&files, "de").is_none());
+	}
+
+	#[test]
+	fn a_catalog_on_disk_matches_whatever_its_directory_is_called() {
+		let base = env::temp_dir().join(format!("patois-registry-test-{}", std::process::id()));
+		let dir = base.join("pt_br").join("LC_MESSAGES");
+		fs::create_dir_all(&dir).unwrap();
+		fs::write(dir.join("app.mo"), make_mo(&[("Hello", "Olá")])).unwrap();
+		let mut registry = Registry::default();
+		registry.register_path("app", base.clone());
+		registry.set_locale("pt_br");
+		let translated = registry.translate("app", "Hello");
+		fs::remove_dir_all(&base).unwrap();
+		assert_eq!(translated, "Olá");
 	}
 }

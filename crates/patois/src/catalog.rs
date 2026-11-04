@@ -109,12 +109,12 @@ fn parse_mo(data: &[u8]) -> Option<Catalog> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
 	use std::io::Cursor;
 
 	use super::*;
 
-	fn make_mo(entries: &[(&str, &str)]) -> Vec<u8> {
+	pub fn make_mo(entries: &[(&str, &str)]) -> Vec<u8> {
 		// Build a minimal little-endian .mo file in memory.
 		// Header: magic, revision, N, orig_offset, trans_offset, hash_size, hash_offset.
 		let n = entries.len();
