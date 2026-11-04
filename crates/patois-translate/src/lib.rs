@@ -550,7 +550,7 @@ mod tests {
 			("Open...", "Abrir", true),
 			("Open", "Abrir", true),
 		]);
-		assert!(copied(&doc).is_empty());
+		assert_eq!(copied(&doc), [] as [String; 0]);
 	}
 
 	#[test]

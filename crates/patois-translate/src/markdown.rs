@@ -298,7 +298,7 @@ mod tests {
 
 	#[test]
 	fn an_empty_span_is_not_a_span() {
-		assert!(code_spans("nothing `` here").is_empty());
+		assert_eq!(code_spans("nothing `` here"), [] as [(std::ops::Range<usize>, &str); 0]);
 	}
 
 	#[test]

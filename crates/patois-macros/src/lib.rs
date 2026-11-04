@@ -272,7 +272,7 @@ mod tests {
 		let scratch = ScratchDir::new("matching_catalogs_ignore");
 		write_mo(scratch.path(), "de", "somethingelse.mo");
 		let app_langs = HashSet::from(["de".to_string()]);
-		assert!(matching_wx_catalogs(scratch.path(), &app_langs).is_empty());
+		assert_eq!(matching_wx_catalogs(scratch.path(), &app_langs), [] as [(String, PathBuf); 0]);
 	}
 
 	#[test]
@@ -280,6 +280,6 @@ mod tests {
 		let scratch = ScratchDir::new("matching_catalogs_missing");
 		let missing = scratch.path().join("does_not_exist");
 		let app_langs = HashSet::from(["de".to_string()]);
-		assert!(matching_wx_catalogs(&missing, &app_langs).is_empty());
+		assert_eq!(matching_wx_catalogs(&missing, &app_langs), [] as [(String, PathBuf); 0]);
 	}
 }

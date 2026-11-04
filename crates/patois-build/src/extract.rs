@@ -688,7 +688,7 @@ msgid \"Shared\""
 		let pot = src.pot("msgid \"\"\nmsgstr \"\"\n\nmsgid \"Rust owned\"\nmsgstr \"\"\n\n#: kt\nmsgid \"Still called\"\nmsgstr \"\"\n\n#: kt\nmsgid \"Gone now\"\nmsgstr \"\"\n\n#: swift\nmsgid \"Another platform\"\nmsgstr \"\"\n");
 		let missing = src.dir.join("not-here");
 		let removed = prune_pot_from_source_dirs(&[&missing], "kt", &pot).unwrap();
-		assert!(removed.is_empty());
+		assert_eq!(removed, [] as [String; 0]);
 		assert_eq!(
 			fs::read_to_string(&pot).unwrap(),
 			"msgid \"\"\nmsgstr \"\"\n\nmsgid \"Rust owned\"\nmsgstr \"\"\n\n#: kt\nmsgid \"Still called\"\nmsgstr \"\"\n\n#: kt\nmsgid \"Gone now\"\nmsgstr \"\"\n\n#: swift\nmsgid \"Another platform\"\nmsgstr \"\"\n"

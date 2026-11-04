@@ -467,7 +467,7 @@ msgstr \"\"
 			&doc,
 			"Are you sure you want to remove the selected document? This will also remove its reading position and bookmarks.",
 		);
-		assert!(entry.msgstr.is_empty());
+		assert_eq!(entry.msgstr, "");
 		let idx = 0;
 		doc.apply_all(&[(idx, "Translated.".to_string())]);
 		assert!(doc.render().contains("msgstr \"Translated.\""));

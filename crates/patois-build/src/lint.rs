@@ -296,7 +296,7 @@ mod tests {
 
 	#[test]
 	fn a_plain_call_is_fine() {
-		assert!(concatenated_translation_calls(r#"t("Open Document")"#).is_empty());
+		assert_eq!(concatenated_translation_calls(r#"t("Open Document")"#), [] as [usize; 0]);
 	}
 
 	#[test]
@@ -317,18 +317,18 @@ mod tests {
 
 	#[test]
 	fn concatenation_outside_the_call_is_ignored() {
-		assert!(concatenated_translation_calls(r#"val s = t("Open") + " " + name"#).is_empty());
+		assert_eq!(concatenated_translation_calls(r#"val s = t("Open") + " " + name"#), [] as [usize; 0]);
 	}
 
 	#[test]
 	fn a_longer_name_ending_in_t_is_not_a_translation_call() {
-		assert!(concatenated_translation_calls(r#"format("a " + "b")"#).is_empty());
-		assert!(concatenated_translation_calls(r#"obj.t("a " + "b")"#).is_empty());
+		assert_eq!(concatenated_translation_calls(r#"format("a " + "b")"#), [] as [usize; 0]);
+		assert_eq!(concatenated_translation_calls(r#"obj.t("a " + "b")"#), [] as [usize; 0]);
 	}
 
 	#[test]
 	fn a_plus_inside_a_literal_is_not_a_join() {
-		assert!(concatenated_translation_calls("t(\"one \\\" + \\\" two\")").is_empty());
+		assert_eq!(concatenated_translation_calls("t(\"one \\\" + \\\" two\")"), [] as [usize; 0]);
 	}
 
 	#[test]
@@ -345,18 +345,18 @@ mod tests {
 
 	#[test]
 	fn a_plain_translation_is_fine() {
-		assert!(stale_shortcuts("msgid \"Close All\"\nmsgstr \"Tout fermer\"\n").is_empty());
+		assert_eq!(stale_shortcuts("msgid \"Close All\"\nmsgstr \"Tout fermer\"\n"), [] as [StaleShortcut; 0]);
 	}
 
 	#[test]
 	fn a_shortcut_on_both_sides_is_fine() {
 		let po = "msgid \"Close &All\\tCtrl+Shift+F4\"\nmsgstr \"Tout &fermer\\tCtrl+Shift+F4\"\n";
-		assert!(stale_shortcuts(po).is_empty());
+		assert_eq!(stale_shortcuts(po), [] as [StaleShortcut; 0]);
 	}
 
 	#[test]
 	fn an_obsolete_entry_is_left_alone() {
 		let po = "#~ msgid \"Go &Back\\tCtrl+[\"\n#~ msgstr \"Aller & Retour    Ctrl+[\"\n";
-		assert!(stale_shortcuts(po).is_empty());
+		assert_eq!(stale_shortcuts(po), [] as [StaleShortcut; 0]);
 	}
 }
