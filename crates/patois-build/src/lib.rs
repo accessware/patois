@@ -1,9 +1,14 @@
-//! Build-script and `xtask` helpers for [patois](https://docs.rs/patois): compile `.po`
-//! catalogs into the `.mo` files an app loads at runtime, regenerate a `.pot` template from
-//! source, and generate the equivalent translation assets for iOS and Android.
+//! Gettext tooling for apps that use [patois](https://docs.rs/patois). Call it from a build script
+//! or an `xtask`.
 //!
-//! It also checks translations and source code for common mistakes ([`check`], [`lint`]), and
-//! reads the translator credits from the catalogs ([`credits`]).
+//! - [`gen_pot`] and [`gen_pot_from_dirs`] extract strings from Rust source into a `.pot` template.
+//! - [`extend_pot_from_source_dirs`] and [`prune_pot_from_source_dirs`] keep the strings of Swift
+//!   and Kotlin source in the same template.
+//! - [`compile_translations`] compiles `.po` catalogs to the `.mo` files that an app embeds.
+//! - [`gen_ios_strings`] and [`gen_android_strings`] generate translation assets for mobile apps.
+//! - [`check`] and [`lint`] find translation mistakes in catalogs and source code.
+//! - [`credits`] reads the names of translators from the catalogs.
+//! - [`po`] edits a `.po` file and leaves the lines it doesn't change as they were.
 
 pub mod check;
 pub mod credits;

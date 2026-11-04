@@ -1,12 +1,12 @@
 //! Checks that catch translation mistakes nothing else reports.
 //!
-//! - [`concatenated_translation_calls`] and [`check_sources`] find `t("a " + "b")`. The
-//!   extractor only takes the first literal, so the `.pot` gets a message that stops mid-sentence
-//!   while the code looks up the whole one. They never match, and the string stays in English in
-//!   every language.
-//! - [`stale_shortcuts`] and [`check_catalogs`] find translations that end in a keyboard
-//!   shortcut their source doesn't have. `msgmerge` copies these in when a menu label loses its
-//!   shortcut, and an app that compiles fuzzy entries shows them.
+//! - [`concatenated_translation_calls`] and [`check_sources`] find `t("a " + "b")`. The extractor
+//!   only takes the first literal, so the `.pot` gets a message that stops mid-sentence while the
+//!   code looks up the whole one. They never match, and the string stays in English in every
+//!   language.
+//! - [`stale_shortcuts`] and [`check_catalogs`] find translations that end in a keyboard shortcut
+//!   their source doesn't have. `msgmerge` copies these in when a menu label loses its shortcut,
+//!   and an app that compiles fuzzy entries shows them.
 //!
 //! Run both before generating the `.pot`, and as tests, so CI catches new mistakes.
 
@@ -144,7 +144,6 @@ fn line_of(chars: &[char], index: usize) -> usize {
 	chars[..index].iter().filter(|&&c| c == '\n').count()
 }
 
-/// The Rust, Kotlin, and Swift files under `dir`, skipping build output.
 fn source_files(dir: &Path, out: &mut Vec<PathBuf>) {
 	let Ok(entries) = fs::read_dir(dir) else {
 		return;
@@ -204,7 +203,9 @@ pub fn check_sources(dirs: &[&Path]) -> Result<(), String> {
 /// A translation that ends in a keyboard shortcut its source doesn't have.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaleShortcut {
+	/// The source string.
 	pub msgid: String,
+	/// The translation, with the shortcut that the source doesn't have.
 	pub msgstr: String,
 }
 

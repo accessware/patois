@@ -1,68 +1,55 @@
-//! The text-level primitives shared by everything that reads or writes gettext files:
-//! parsing `msgid`/`msgid_plural` entries out of a pot or po, rendering an entry back out,
-//! and the escaping rules on both sides of that.
+use std::{collections::HashSet, fmt::Write as _};
 
-use std::collections::HashSet;
-
-/// A parsed pot/po entry: a msgid, its msgid_plural text if it's a plural entry, the `#:`
-/// reference naming what produced it, and the `#.` note left for translators, for entries
-/// that carry them.
-pub(crate) struct PotEntry {
+pub struct PotEntry {
 	pub(crate) msgid: String,
 	pub(crate) msgid_plural: Option<String>,
-	/// The entry's `#:` line, naming the scan the string came from (e.g. `swift`).
+	/// The `#:` line, which names the scan the string came from, such as `swift`.
 	///
-	/// `xgettext` runs with `--no-location`, so nothing extracted from Rust ever carries one.
-	/// That is what makes a reference usable as the marker for "this came from a non-Rust
-	/// scan", and what lets a regeneration carry those entries across without also
-	/// resurrecting Rust msgids that were renamed or deleted in the same edit.
+	/// `xgettext` runs with `--no-location`, so nothing extracted from Rust has one. That makes a
+	/// reference a reliable mark of a non-Rust string, which a regeneration can carry across
+	/// without also bringing back Rust strings that were renamed or deleted.
 	pub(crate) reference: Option<String>,
-	/// The entry's `#.` extracted-comment text: the note the source left for translators.
-	///
-	/// Stored without the `#. ` prefix, and newline-separated when the note ran to several
-	/// lines. `xgettext --add-comments=TRANSLATORS` produces these for Rust; the hand-written
-	/// scanner in [`crate::extract`] produces them for the other languages.
+	/// The `#.` note for translators, without the marker. Lines of a longer note are separated by
+	/// newlines.
 	pub(crate) comment: Option<String>,
 }
 
-/// Renders a `PotEntry` as the block of lines to append to a pot file (blank msgstr(s), ready
-/// for `msgmerge` or a translator to fill in).
+/// Renders an entry with blank translations.
 ///
-/// The `#:` line is re-emitted when the entry has one. Dropping it would un-mark a foreign
-/// entry the moment it was preserved, so the next regeneration would discard it, the scan that
-/// owns it would add it back, and the pot would be rewritten on every other run.
-pub(crate) fn pot_entry_block(entry: &PotEntry) -> String {
+/// Keeps the `#:` line. Without it, the next regeneration discards the entry, the scan that owns it
+/// adds it back, and the pot is rewritten on every other run.
+pub fn pot_entry_block(entry: &PotEntry) -> String {
 	// `#.` sits above `#:`, the order xgettext itself writes the two in.
-	let comment = entry
-		.comment
-		.as_ref()
-		.map_or_else(String::new, |c| c.lines().map(|line| format!("#. {line}\n")).collect::<String>());
+	let comment = entry.comment.as_ref().map_or_else(String::new, |c| {
+		c.lines().fold(String::new(), |mut out, line| {
+			let _ = writeln!(out, "#. {line}");
+			out
+		})
+	});
 	let reference = entry.reference.as_ref().map_or_else(String::new, |r| format!("#: {r}\n"));
-	match &entry.msgid_plural {
-		Some(plural) => format!(
-			"\n{comment}{reference}msgid \"{}\"\nmsgid_plural \"{}\"\nmsgstr[0] \"\"\nmsgstr[1] \"\"\n",
-			pot_escape(&entry.msgid),
-			pot_escape(plural)
-		),
-		None => format!("\n{comment}{reference}msgid \"{}\"\nmsgstr \"\"\n", pot_escape(&entry.msgid)),
-	}
+	let msgid = pot_escape(&entry.msgid);
+	entry.msgid_plural.as_ref().map_or_else(
+		|| format!("\n{comment}{reference}msgid \"{msgid}\"\nmsgstr \"\"\n"),
+		|plural| {
+			let plural = pot_escape(plural);
+			format!(
+				"\n{comment}{reference}msgid \"{msgid}\"\nmsgid_plural \"{plural}\"\nmsgstr[0] \"\"\nmsgstr[1] \"\"\n"
+			)
+		},
+	)
 }
 
-/// Parse msgid values already present in a pot/po file.
-pub(crate) fn collect_pot_msgids(content: &str) -> HashSet<String> {
+pub fn collect_pot_msgids(content: &str) -> HashSet<String> {
 	collect_pot_entries_ordered(content).into_iter().map(|e| e.msgid).collect()
 }
 
-/// Parse msgid/msgid_plural entries already present in a pot/po file, preserving first-seen
-/// order.
-pub(crate) fn collect_pot_entries_ordered(content: &str) -> Vec<PotEntry> {
+pub fn collect_pot_entries_ordered(content: &str) -> Vec<PotEntry> {
 	let mut entries: Vec<PotEntry> = Vec::new();
 	let mut current_id = String::new();
 	let mut current_plural: Option<String> = None;
 	let mut current_reference: Option<String> = None;
 	let mut current_comment: Option<String> = None;
-	// A `#:` line comes *before* the msgid it belongs to, so it is held here until that msgid
-	// line arrives and takes it.
+	// A `#:` line comes before the msgid it belongs to.
 	let mut pending_reference: Option<String> = None;
 	let mut pending_comment: Option<String> = None;
 	let mut in_msgid = false;
@@ -89,12 +76,9 @@ pub(crate) fn collect_pot_entries_ordered(content: &str) -> Vec<PotEntry> {
 	for line in content.lines() {
 		let line = line.trim();
 		if let Some(rest) = line.strip_prefix("#.") {
-			// A note can run to several `#.` lines; keep them as one newline-joined string.
 			let text = rest.trim();
-			pending_comment = Some(match pending_comment.take() {
-				Some(existing) => format!("{existing}\n{text}"),
-				None => text.to_string(),
-			});
+			pending_comment =
+				Some(pending_comment.take().map_or_else(|| text.to_string(), |existing| format!("{existing}\n{text}")));
 		} else if let Some(rest) = line.strip_prefix("#:") {
 			pending_reference = Some(rest.trim().to_string());
 		} else if let Some(rest) = line.strip_prefix("msgid_plural ") {
@@ -109,7 +93,6 @@ pub(crate) fn collect_pot_entries_ordered(content: &str) -> Vec<PotEntry> {
 			in_msgid = true;
 			in_msgid_plural = false;
 		} else if line.starts_with("msgstr") {
-			// Covers both a plain entry's `msgstr "..."` and a plural entry's `msgstr[N] "..."`.
 			flush(&mut current_id, &mut current_plural, &mut current_reference, &mut current_comment, &mut entries);
 			in_msgid = false;
 			in_msgid_plural = false;
@@ -127,8 +110,7 @@ pub(crate) fn collect_pot_entries_ordered(content: &str) -> Vec<PotEntry> {
 	entries
 }
 
-/// Escape a string for use as a pot msgid value (between the outer double-quotes).
-pub(crate) fn pot_escape(s: &str) -> String {
+pub fn pot_escape(s: &str) -> String {
 	let mut out = String::with_capacity(s.len());
 	for c in s.chars() {
 		match c {
@@ -142,7 +124,7 @@ pub(crate) fn pot_escape(s: &str) -> String {
 	out
 }
 
-pub(crate) fn po_unescape(s: &str) -> String {
+pub fn po_unescape(s: &str) -> String {
 	let s = s.trim();
 	if s.len() < 2 || !s.starts_with('"') || !s.ends_with('"') {
 		return String::new();
@@ -156,10 +138,11 @@ pub(crate) fn po_unescape(s: &str) -> String {
 				Some('n') => out.push('\n'),
 				Some('t') => out.push('\t'),
 				Some('"') => out.push('"'),
-				Some('\\') => out.push('\\'),
 				Some(c) => {
 					out.push('\\');
-					out.push(c);
+					if c != '\\' {
+						out.push(c);
+					}
 				}
 				None => out.push('\\'),
 			}

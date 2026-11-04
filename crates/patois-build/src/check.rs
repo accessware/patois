@@ -1,5 +1,5 @@
-//! Whether a translation kept what isn't prose: the placeholders, the accelerator, and the
-//! shortcut suffix of its source, and all the forms a plural needs.
+//! Checks that a translation kept the parts of its source that aren't prose: the placeholders, the
+//! accelerator, the shortcut suffix, and all the plural forms.
 //!
 //! Use [`check`] and [`check_plural`] on new translations, such as machine translations, before
 //! writing them to a catalog. Use [`is_damaged`] to find bad translations already in a catalog,
@@ -42,7 +42,6 @@ pub fn is_damaged(source: &str, translated: &str) -> bool {
 	!translated.is_empty() && check(source, translated).is_none()
 }
 
-/// How many `%s`, `%d`, and `{}` placeholders a string has.
 fn placeholder_counts(s: &str) -> (usize, usize, usize) {
 	(s.matches("%s").count(), s.matches("%d").count(), s.matches("{}").count())
 }

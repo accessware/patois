@@ -1,5 +1,3 @@
-//! Regenerating a `.pot` template from Rust sources via `xgettext`.
-
 use std::{
 	collections::HashSet,
 	env, error, fs,
@@ -12,10 +10,14 @@ use crate::{
 	sanitize_rust,
 };
 
-/// Regenerate `<po_dir>/<package_name>.pot` from explicit source directories.
+/// Regenerates `<po_dir>/<package_name>.pot` from the Rust files in `source_dirs`.
 ///
-/// Unlike [`gen_pot`], this does not invoke `cargo` and is safe to call from a build script.
-/// Requires `xgettext` on `PATH`; returns `Err` (not a hard failure) if it is missing.
+/// Unlike [`gen_pot`], this function doesn't run `cargo`, so it's safe to call from a build script.
+/// It needs `xgettext` on `PATH`.
+///
+/// # Errors
+///
+/// Returns an error if `xgettext` is missing or fails, or if a file can't be read or written.
 pub fn gen_pot_from_dirs(
 	source_dirs: &[impl AsRef<Path>],
 	po_dir: impl AsRef<Path>,
@@ -28,12 +30,8 @@ pub fn gen_pot_from_dirs(
 	}
 	let mut files: Vec<PathBuf> = Vec::new();
 	for dir in source_dirs {
-		// Sort within each directory (safe: paths share a common prefix, so absolute-path
-		// order matches relative order on every machine) rather than sorting the combined
-		// list (unsafe: `source_dirs` entries can resolve to unrelated absolute locations,
-		// e.g. one under the project checkout and one under a dependency's cache, whose
-		// relative order then depends on incidental, machine-specific path spelling like
-		// `.cargo` vs `scoop`). See the longer comment in `gen_pot`.
+		// Sort within each directory only. Directories can be in unrelated places, such as a
+		// checkout and a registry cache, whose relative order differs between machines.
 		let mut dir_files: Vec<PathBuf> = Vec::new();
 		collect_rust_files(dir.as_ref(), &mut dir_files)?;
 		dir_files.sort();
@@ -46,9 +44,16 @@ pub fn gen_pot_from_dirs(
 	Ok(())
 }
 
-/// Regenerate `<po_dir>/<package_name>.pot` by scanning all workspace crates tagged with `[package.metadata.patois] translatable = true`.
+/// Regenerates `<po_dir>/<package_name>.pot` from every package with
+/// `[package.metadata.patois] translatable = true`, including dependencies.
 ///
-/// Pass the name of the primary package, used for the output filename, `--package-name`, and `--package-version` in the generated header. Requires `xgettext` and `cargo` on `PATH`.
+/// `package_name` is the primary package, which names the file and fills in its header. The
+/// function needs `xgettext` and `cargo` on `PATH`.
+///
+/// # Errors
+///
+/// Returns an error if `xgettext` or `cargo metadata` is missing or fails, if no tagged package has
+/// any source files, or if a file can't be read or written.
 pub fn gen_pot(
 	project_root: impl AsRef<Path>,
 	po_dir: impl AsRef<Path>,
@@ -58,7 +63,7 @@ pub fn gen_pot(
 	let po_dir = po_dir.as_ref();
 	fs::create_dir_all(po_dir)?;
 	if Command::new("xgettext").arg("--version").output().is_err() {
-		return Err("xgettext not found; install gettext tools (e.g. `scoop install gettext`)".into());
+		return Err("xgettext not found; install gettext tools".into());
 	}
 	let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
 	let meta_output = Command::new(&cargo).args(["metadata", "--format-version", "1"]).current_dir(root).output()?;
@@ -68,12 +73,9 @@ pub fn gen_pot(
 	let meta: serde_json::Value = serde_json::from_slice(&meta_output.stdout)?;
 	let mut packages: Vec<&serde_json::Value> =
 		meta["packages"].as_array().ok_or("cargo metadata: missing packages")?.iter().collect();
-	// `fs::read_dir` order isn't guaranteed stable across runs, and neither is `cargo
-	// metadata`'s package ordering — sort packages by name (not filesystem path: a package's
-	// manifest_path can resolve under the project checkout for one contributor and under
-	// their CARGO_HOME's registry/git cache for another, e.g. `.cargo` vs `scoop`, or `git` vs
-	// `pb`, and those absolute prefixes sort differently from machine to machine) so package
-	// order is deterministic and independent of where things happen to live on disk.
+	// Sort by name, not path: a package can be in a checkout for one contributor and in a registry
+	// cache for another, and those sort differently. A stable order keeps the pot from changing
+	// between machines.
 	packages.sort_by_key(|pkg| pkg["name"].as_str().unwrap_or_default().to_string());
 	let mut files: Vec<PathBuf> = Vec::new();
 	for pkg in &packages {
@@ -82,12 +84,6 @@ pub fn gen_pot(
 		}
 		let manifest = pkg["manifest_path"].as_str().ok_or("cargo metadata: missing manifest_path")?;
 		let src = Path::new(manifest).parent().ok_or("cargo metadata: manifest_path has no parent")?.join("src");
-		// Sort each package's own files by absolute path — safe here since they all share
-		// that package's src root as a common prefix, so relative order is stable across
-		// machines even though the shared prefix itself isn't. This is what keeps the file
-		// list (and therefore xgettext's output) deterministic between runs, so pot_changed's
-		// comparison below isn't fooled by incidental reordering into a spurious rewrite (with
-		// a fresh POT-Creation-Date) on every build.
 		let mut pkg_files: Vec<PathBuf> = Vec::new();
 		collect_rust_files(&src, &mut pkg_files)?;
 		pkg_files.sort();
@@ -111,15 +107,8 @@ pub fn gen_pot(
 	Ok(())
 }
 
-/// Run `xgettext` over `files` and merge the result into `<po_dir>/<package_name>.pot`,
-/// returning whether the pot on disk actually changed.
-///
-/// The sources are sanitized on the way in (see [`sanitize_rust`]): xgettext has no Rust
-/// mode, and the C tokenizer it is asked to use instead runs on past lifetimes and raw
-/// strings, swallowing or splicing unrelated strings further down the file, and in later
-/// files too since they all go to one invocation. Doing it here rather than exposing a
-/// helper keeps `--language=C` an implementation detail of this crate, so no caller has to
-/// know about it or remember to work around it.
+/// Runs `xgettext` over `files`, merges the result into the pot, and returns whether the pot
+/// changed.
 fn write_pot(
 	files: &[PathBuf],
 	po_dir: &Path,
@@ -146,17 +135,15 @@ fn write_pot(
 	}
 }
 
-/// Write a sanitized copy of every file in `files` into `scratch`, returning the copies in
-/// the same order.
+/// Writes a sanitized copy of each file to `scratch`.
 ///
-/// The copies live flat in one directory, named by their position in `files`: two crates can
-/// each have a `main.rs`, and the names never reach the pot (`--no-location`), so they only
-/// have to be unique and recognisable in an xgettext error message.
+/// Each copy's name starts with its position in `files`, because two crates can each have a
+/// `main.rs`. The names never reach the pot, because of `--no-location`.
 fn sanitize_files_into(scratch: &Path, files: &[PathBuf]) -> Result<Vec<PathBuf>, Box<dyn error::Error>> {
 	fs::create_dir_all(scratch)?;
 	let mut sources = Vec::with_capacity(files.len());
 	for (index, file) in files.iter().enumerate() {
-		let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "src.rs".to_string());
+		let name = file.file_name().map_or_else(|| "src.rs".to_string(), |n| n.to_string_lossy().into_owned());
 		let dest = scratch.join(format!("{index:05}-{name}"));
 		fs::write(&dest, sanitize_rust::sanitize_for_xgettext(&fs::read_to_string(file)?))?;
 		sources.push(dest);
@@ -205,13 +192,8 @@ fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), Box<dy
 	Ok(())
 }
 
-/// Strips `c-format`/`no-c-format` flags that `xgettext`'s built-in heuristic attaches to `#,`
-/// comment lines based on scanning each msgid for `%`-style directives. Whether a given msgid
-/// gets flagged is a heuristic guess that differs across `xgettext` versions and platforms
-/// (confirmed: the same source produced different flags on different machines), and nothing
-/// in typical downstream tooling (`msgfmt --check-format`, custom placeholder validation)
-/// necessarily reads this flag, so keeping it around only adds version-dependent churn to the
-/// generated file for no guaranteed benefit. Leaves other flags (e.g. `fuzzy`) untouched.
+/// Removes the `c-format` and `no-c-format` flags. `xgettext` guesses them, and the same source
+/// gets different flags from different versions, which churns the pot.
 fn strip_format_flags(path: &Path) -> Result<(), Box<dyn error::Error>> {
 	let content = fs::read_to_string(path)?;
 	let mut out = String::with_capacity(content.len());
@@ -234,15 +216,8 @@ fn strip_format_flags(path: &Path) -> Result<(), Box<dyn error::Error>> {
 	Ok(())
 }
 
-/// Declares the pot's own charset as UTF-8 in place of `xgettext`'s placeholder `CHARSET`.
-///
-/// `xgettext` always leaves this as a placeholder, on the assumption that a `.pot`'s real
-/// charset is only decided once a `.po` translation commits to one. That assumption holds only
-/// if the msgids and comments it scanned are themselves pure ASCII; this project's aren't (a
-/// few strings use symbols like `×`, and Kotlin/Swift's "many" plural marker embeds a literal
-/// U+2063 character), so the placeholder leaves the file declaring a charset that doesn't
-/// match its actual bytes. `msgmerge` enforces that mismatch strictly and refuses to read the
-/// file at all: "contains non-ASCII characters but the present charset ... is not UTF-8".
+/// Replaces `xgettext`'s `CHARSET` placeholder with UTF-8. `msgmerge` refuses to read a file with
+/// the placeholder if any string isn't pure ASCII.
 fn fix_charset_header(path: &Path) -> Result<(), Box<dyn error::Error>> {
 	let content = fs::read_to_string(path)?;
 	let fixed = content.replacen("charset=CHARSET", "charset=UTF-8", 1);
@@ -252,35 +227,22 @@ fn fix_charset_header(path: &Path) -> Result<(), Box<dyn error::Error>> {
 	Ok(())
 }
 
-/// Returns true if `.pot` content changed, ignoring the `POT-Creation-Date` header line.
 fn pot_changed(old: &Path, new: &Path) -> bool {
 	let strip_date = |s: &str| -> String {
 		s.lines().filter(|l| !l.starts_with("\"POT-Creation-Date:")).collect::<Vec<_>>().join("\n")
 	};
 	let old = fs::read_to_string(old).unwrap_or_default();
-	let new = match fs::read_to_string(new) {
-		Ok(c) => c,
-		Err(_) => return true,
+	let Ok(new) = fs::read_to_string(new) else {
+		return true;
 	};
 	strip_date(&old) != strip_date(&new)
 }
 
-/// Copy the entries `old` got from a non-Rust scan into `new`, appending them at the end.
+/// Copies the entries that `old` got from a non-Rust scan to the end of `new`.
 ///
-/// `gen_pot`/`gen_pot_from_dirs` regenerate the `.pot` from a single language's sources (Rust),
-/// but callers often layer other languages on top afterward via
-/// [`extend_pot_from_source_dirs`] (e.g. iOS/Android). Without this step, the freshly
-/// regenerated file would always be missing those entries relative to the accumulated file on
-/// disk, so `pot_changed` would see a spurious difference and bump `POT-Creation-Date` on every
-/// single build even when no msgid actually changed.
-///
-/// Which entries those are is read off the `#:` reference [`extend_pot_from_source_dirs`]
-/// stamps on everything it adds, not inferred from "the Rust scan didn't produce it". The
-/// inference is what this function used to do, and it is wrong in a way that only shows up
-/// later: a msgid that Rust no longer produces because it was just renamed or deleted looks
-/// exactly like a Swift one, so it was copied forward, and then copied forward again on every
-/// subsequent run, since by then it was in `old` too. The dead msgid outlived the source line
-/// it came from indefinitely, and a `grep` for it in the tree turned up nothing to explain it.
+/// Without this function, a regenerated pot would lack those entries and always look changed.
+/// The `#:` reference identifies them. Asking which strings the Rust scan didn't produce would also
+/// catch a renamed Rust string, and keep it in the pot for good.
 fn preserve_foreign_entries(old: &Path, new: &Path) -> Result<(), Box<dyn error::Error>> {
 	let Ok(old_content) = fs::read_to_string(old) else {
 		return Ok(());
@@ -401,11 +363,8 @@ msgstr \"\"
 		assert!(result.contains("msgstr[1] \"\""));
 	}
 
-	// The bug this whole `#:` marker exists for. Renaming a `t("...")` string means the fresh
-	// Rust scan stops producing the old msgid, which is indistinguishable from a Swift/Kotlin
-	// entry if you only ask "did the Rust scan produce it". Carrying it forward stranded the
-	// dead msgid in the pot, and because it was then in `old` on the next run too, no later
-	// regeneration would ever drop it.
+	// A renamed string looks like a Swift or Kotlin one if the only question is whether the Rust
+	// scan produced it, and carrying it forward would keep it in the pot for good.
 	#[test]
 	fn a_renamed_rust_msgid_is_not_carried_forward() {
 		let dir = scratch("preserve-rename-test");
@@ -421,7 +380,7 @@ msgstr \"\"
 	}
 
 	// A foreign entry has to come back out of `preserve_foreign_entries` still marked, or the
-	// next run wouldn't recognise it, would drop it, and the Swift scan would append it again:
+	// next run wouldn't recognize it, would drop it, and the Swift scan would append it again:
 	// a rewritten pot (and a fresh POT-Creation-Date) on every other run, forever.
 	#[test]
 	fn a_preserved_foreign_entry_keeps_its_marker() {

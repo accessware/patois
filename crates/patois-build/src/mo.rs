@@ -1,16 +1,17 @@
-//! Compiling `.po` catalogs into the binary `.mo` files an app loads at runtime.
-
 use std::{
 	env, fs,
 	path::{Path, PathBuf},
 	process::Command,
 };
 
-/// Compile all `.po` files in `po_dir` into `.mo` files under `locale_dir`.
+/// Compiles each `.po` file in `po_dir` to `<locale_dir>/<lang>/LC_MESSAGES/<domain>.mo`, where
+/// `<domain>` is the name of the crate.
 ///
-/// Output path for each language: `<locale_dir>/<lang>/LC_MESSAGES/<domain>.mo` where `<domain>` is the crate name (`CARGO_PKG_NAME`).
+/// Call this function from a build script. Relative paths start at the crate root. The function
+/// tells Cargo to run the build script again when a catalog changes.
 ///
-/// Relative paths are resolved from `CARGO_MANIFEST_DIR`. Emits `cargo:rerun-if-changed` lines for the input directory and every `.po` file. Requires `msgfmt` on `PATH`; prints a `cargo:warning` if it is missing.
+/// Problems such as a missing `msgfmt` are reported as Cargo warnings, so a build without gettext
+/// still succeeds, without translations.
 pub fn compile_translations(po_dir: impl AsRef<Path>, locale_dir: impl AsRef<Path>) {
 	let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
 	let abs = |p: &Path| if p.is_absolute() { p.to_path_buf() } else { manifest_dir.join(p) };
@@ -57,14 +58,12 @@ pub fn compile_translations(po_dir: impl AsRef<Path>, locale_dir: impl AsRef<Pat
 }
 
 fn run_msgfmt(input: &Path, output: &Path) {
-	// `--use-fuzzy`: `PoDocument::apply_all` leaves every machine-translated entry flagged
-	// `#, fuzzy` permanently (see its doc comment and `needs_translation`), as the marker
-	// that it's translated-but-unreviewed rather than untranslated. msgfmt's default of
-	// dropping fuzzy entries from the compiled catalog would make that distinction pointless
-	// here: the entry would sit in the .po translated forever but never reach the app.
+	// `fuzzy` marks a machine translation that no person has reviewed, as `PoDocument::apply`
+	// writes it. msgfmt drops fuzzy entries by default, and these would then never reach the
+	// app.
 	match Command::new("msgfmt").arg("--use-fuzzy").arg(input).arg("-o").arg(output).status() {
 		Ok(s) if s.success() => {}
 		Ok(s) => println!("cargo:warning=patois-build: msgfmt exited with {s} compiling {}", input.display()),
-		Err(e) => println!("cargo:warning=patois-build: msgfmt not available ({}); install gettext tools", e),
+		Err(e) => println!("cargo:warning=patois-build: msgfmt not available ({e}); install gettext tools"),
 	}
 }

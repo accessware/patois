@@ -1,6 +1,5 @@
-//! Scanning non-Rust sources (Swift, Kotlin) for `t()`/`nt()` calls and appending what they
-//! turn up to an existing `.pot`. A small hand-written scanner rather than another `xgettext`
-//! invocation, since those languages need no sanitizing and the call shapes are simple.
+//! Extracts strings from Swift and Kotlin source. This is a small scanner rather than another
+//! `xgettext` run because those languages need no sanitizing and their call shapes are simple.
 
 use std::{
 	collections::{HashMap, HashSet},
@@ -10,14 +9,13 @@ use std::{
 
 use crate::entries::{PotEntry, collect_pot_msgids, po_unescape, pot_entry_block};
 
-/// Collect source files with the given extension from a directory tree in sorted order.
 fn collect_source_files(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) -> Result<(), Box<dyn error::Error>> {
 	if !dir.is_dir() {
 		return Ok(());
 	}
 	let mut paths = fs::read_dir(dir)?.map(|entry| entry.map(|e| e.path())).collect::<Result<Vec<_>, _>>()?;
-	// `fs::read_dir` does not guarantee an order. Sort before visiting so POT entry order
-	// and the first occurrence chosen for each translator comment are reproducible.
+	// `fs::read_dir` guarantees no order, and the order decides the pot's entries and which
+	// occurrence of a string gives its translator note.
 	paths.sort();
 	for path in paths {
 		if path.is_dir() {
@@ -29,13 +27,17 @@ fn collect_source_files(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) -
 	Ok(())
 }
 
-/// Extend an existing `.pot` file with strings from source files in the given directories.
+/// Adds the strings of `t("...")` and `nt("...", "...", n)` calls in other languages to an existing
+/// `.pot` file.
 ///
-/// Scans files matching `extension` (e.g. `"swift"` or `"kt"`) for `t("...")` and
-/// `nt("...", "...", ...)` calls using a native Rust parser, no xgettext required. Handles
-/// standard C-style escape sequences in string literals. Directories follow caller order;
-/// files within each directory are sorted by path. Repeated messages use the first
-/// occurrence and its translator comment.
+/// Scans the files with the given `extension`, such as `swift` or `kt`, and doesn't need
+/// `xgettext`. Each added entry is marked with `extension`, so [`gen_pot`](crate::gen_pot) keeps it
+/// and [`prune_pot_from_source_dirs`] can remove it. If a string appears more than once, its first
+/// occurrence gives its translator note. Does nothing if `pot_file` doesn't exist.
+///
+/// # Errors
+///
+/// Returns an error if a file can't be read or the pot can't be written.
 pub fn extend_pot_from_source_dirs(
 	dirs: &[impl AsRef<Path>],
 	extension: &str,
@@ -53,14 +55,7 @@ pub fn extend_pot_from_source_dirs(
 		return Ok(());
 	}
 
-	// Collect t("...")/nt("...", "...") calls from every source file, preserving first-seen
-	// order. Both share one "seen" set keyed on the singular text so the same string can't be
-	// added twice even if it turns up as both a t() and an nt() call somewhere.
-	//
-	// Every entry is stamped with `extension` as its `#:` reference. That is what marks it as
-	// belonging to this scan rather than to the Rust one that wrote the pot, so a later
-	// regeneration can carry it across (see `pot::preserve_foreign_entries`) without having to
-	// guess, and without that guess also resurrecting deleted Rust msgids.
+	// `t()` and `nt()` share one set because gettext keys a catalog on the singular text.
 	let mut new_entries: Vec<PotEntry> = Vec::new();
 	let mut seen_in_scan: HashSet<String> = HashSet::new();
 	for file in &files {
@@ -90,22 +85,17 @@ pub fn extend_pot_from_source_dirs(
 		return Ok(());
 	}
 
-	// Read the existing pot and collect msgids already present.
 	let existing = fs::read_to_string(pot_file)?;
 	let existing_ids = collect_pot_msgids(&existing);
 
-	// Bring the notes on entries already in the pot up to date before appending the rest.
 	let notes: HashMap<&str, Option<&str>> =
 		new_entries.iter().map(|e| (e.msgid.as_str(), e.comment.as_deref())).collect();
 	let refreshed = refresh_foreign_comments(&existing, &notes, extension);
-	// A string both front ends use is written by whichever scan ran first, and without this the
-	// second one leaves no mark on it at all. Pruning is per reference, so the entry then looks
-	// like it belongs to the other front end alone, and dropping the string there took it away
-	// from this one too.
+	// Pruning works per reference, so a string that two front ends use needs a reference from each,
+	// or dropping it from one front end takes it from the other too.
 	let scanned: HashSet<&str> = new_entries.iter().map(|e| e.msgid.as_str()).collect();
 	let refreshed = add_reference_to_shared_entries(&refreshed, &scanned, extension);
 
-	// Append only truly new entries.
 	let mut additions = String::new();
 	for entry in &new_entries {
 		if !existing_ids.contains(&entry.msgid) {
@@ -118,16 +108,12 @@ pub fn extend_pot_from_source_dirs(
 	Ok(())
 }
 
-/// Remove the entries a previous [`extend_pot_from_source_dirs`] added whose string no longer
-/// appears in the sources, and report what went.
+/// Removes the entries that [`extend_pot_from_source_dirs`] added whose strings are no longer in
+/// the sources, and returns those strings.
 ///
-/// Adding is not enough on its own: a `#: <extension>` entry stays in the pot for good once it
-/// lands there, because a regeneration copies it across rather than rebuilding it from source
-/// (see `pot::preserve_foreign_entries`). Renaming or deleting a `t("...")` call therefore
-/// leaves the old text behind, and translators keep being asked for a string nothing reads.
-///
-/// Entries carrying a different `#:` reference, and the xgettext-owned ones carrying none, are
-/// left alone.
+/// A regeneration copies these entries across rather than rebuilding them from source, so without
+/// this function a renamed or deleted string stays in the pot, and translators keep translating
+/// it. Entries from other scans, and entries from the Rust scan, stay.
 ///
 /// # Errors
 ///
@@ -146,15 +132,11 @@ pub fn prune_pot_from_source_dirs(
 	for dir in dirs {
 		collect_source_files(dir.as_ref(), extension, &mut files)?;
 	}
-	// Nothing to compare against is not the same as nothing being alive: a directory that moved
-	// would otherwise read as every string having been deleted at once.
+	// A directory that moved would otherwise read as every string having been deleted.
 	if files.is_empty() {
 		return Ok(Vec::new());
 	}
-	// Asking the extractor what the sources say, rather than searching them for the text, means
-	// an entry survives exactly when the call that produced it is still there. Searching would
-	// also keep one whose words happen to appear in a comment, or in a string that is not a
-	// translation call at all.
+	// Searching the sources for the text would also keep a string whose words appear in a comment.
 	let mut alive: HashSet<String> = HashSet::new();
 	for file in &files {
 		let content = fs::read_to_string(file)?;
@@ -181,12 +163,8 @@ pub fn prune_pot_from_source_dirs(
 			if alive.contains(&msgid) {
 				return Some(block.to_string());
 			}
-			// Only this scan's claim on the string goes. Another front end may use the same
-			// string, and taking the whole entry would leave that one asking for a translation
-			// the pot no longer has.
-			let others: Vec<&str> =
-				lines.iter().copied().filter(|l| l.trim().starts_with("#: ") && l.trim() != reference).collect();
-			if others.is_empty() {
+			// Another front end may still use the string, so only this scan's reference goes.
+			if !lines.iter().any(|l| l.trim().starts_with("#: ") && l.trim() != reference) {
 				removed.push(msgid);
 				return None;
 			}
@@ -202,12 +180,9 @@ pub fn prune_pot_from_source_dirs(
 	Ok(removed)
 }
 
-/// Adds this scan's `#:` reference to entries that are already in the pot under someone else's.
-///
-/// An entry only ever carries the reference of the scan that first wrote it, so a string used by
-/// both front ends looks like it belongs to one of them. Marking it as this scan's too is what
-/// lets [`prune_pot_from_source_dirs`] tell "nobody uses this any more" from "this front end
-/// stopped using it", and keep the entry in the second case.
+/// Adds this scan's `#:` reference to entries that another scan wrote, so that
+/// [`prune_pot_from_source_dirs`] can tell a string nobody uses from one that a single front end
+/// stopped using.
 fn add_reference_to_shared_entries(content: &str, scanned: &HashSet<&str>, extension: &str) -> String {
 	let reference = format!("#: {extension}");
 	content
@@ -215,8 +190,7 @@ fn add_reference_to_shared_entries(content: &str, scanned: &HashSet<&str>, exten
 		.map(|block| {
 			let trailing = if block.ends_with('\n') { "\n" } else { "" };
 			let lines: Vec<&str> = block.lines().collect();
-			// An entry with no reference at all is xgettext's own, and the Rust scan rebuilds
-			// those from source every time, so a reference added here would not survive anyway.
+			// The Rust scan rebuilds entries with no reference, so an added one wouldn't survive.
 			if lines.iter().any(|l| l.trim() == reference) || !lines.iter().any(|l| l.trim().starts_with("#: ")) {
 				return block.to_string();
 			}
@@ -237,22 +211,17 @@ fn add_reference_to_shared_entries(content: &str, scanned: &HashSet<&str>, exten
 		.join("\n\n")
 }
 
-/// Bring the `#.` notes on the entries this scan owns into line with what the sources now say.
+/// Updates the `#.` notes on this scan's entries.
 ///
-/// [`extend_pot_from_source_dirs`] only ever *appends* msgids the pot does not have yet, and a
-/// regeneration copies the ones it does have across verbatim (see
-/// `pot::preserve_foreign_entries`), so without this step a note added, reworded or deleted
-/// after its msgid first landed would never reach the catalog. Entries carrying a different
-/// `#:` reference, and the xgettext-owned ones carrying none, are left untouched.
+/// New entries are the only ones written from source, so without this function a note added or
+/// changed after its string first reached the pot would never reach the catalog.
 fn refresh_foreign_comments(content: &str, notes: &HashMap<&str, Option<&str>>, extension: &str) -> String {
 	let reference = format!("#: {extension}");
-	// Entries are blank-line separated, and a newline inside a string is escaped rather than
-	// literal, so an empty line is always an entry boundary and never part of one.
+	// A newline inside a string is escaped, so an empty line is always an entry boundary.
 	content
 		.split("\n\n")
 		.map(|block| {
-			// `lines()` drops a trailing newline, and on the final block that newline is the
-			// file's own, so put it back rather than leaving the pot without one.
+			// `lines()` drops a trailing newline, which on the final block is the file's own.
 			let trailing = if block.ends_with('\n') { "\n" } else { "" };
 			let lines: Vec<&str> = block.lines().collect();
 			if !lines.iter().any(|l| l.trim() == reference) {
@@ -265,7 +234,6 @@ fn refresh_foreign_comments(content: &str, notes: &HashMap<&str, Option<&str>>, 
 				return block.to_string();
 			};
 			let mut rebuilt: Vec<String> = Vec::with_capacity(lines.len() + 1);
-			// A leading empty line is the separator this block was split on; keep it in place.
 			let mut rest = lines.as_slice();
 			while let Some((first, tail)) = rest.split_first() {
 				if first.trim().is_empty() {
@@ -285,7 +253,6 @@ fn refresh_foreign_comments(content: &str, notes: &HashMap<&str, Option<&str>>, 
 		.join("\n\n")
 }
 
-/// The decoded `msgid` of one pot entry's lines, following its continuation lines.
 fn block_msgid(lines: &[&str]) -> Option<String> {
 	let start = lines.iter().position(|l| l.starts_with("msgid "))?;
 	let mut msgid = po_unescape(lines[start].trim_start_matches("msgid "));
@@ -299,10 +266,8 @@ fn block_msgid(lines: &[&str]) -> Option<String> {
 	Some(msgid)
 }
 
-/// Reads a `"..."` string literal starting at `pos` (may point at whitespace before the
-/// opening quote). Returns the decoded string and the index just past the closing quote, or
-/// `None` if there's no quote there, or the literal is never terminated (hits a raw newline or
-/// end of input first). Handles standard C/Swift/Kotlin escapes (`\\`, `\"`, `\n`, `\t`).
+/// Reads the string literal at `pos`, after any whitespace, and returns it decoded with the index
+/// past its closing quote. Returns `None` if there's no literal or it isn't terminated.
 fn read_string_literal(chars: &[char], mut pos: usize) -> Option<(String, usize)> {
 	let n = chars.len();
 	while pos < n && chars[pos].is_ascii_whitespace() {
@@ -346,8 +311,9 @@ fn read_string_literal(chars: &[char], mut pos: usize) -> Option<(String, usize)
 	}
 }
 
-/// Decode the `\u{…}` (Rust, Swift) or `\uXXXX` (Kotlin) escape whose `u` is at `pos`, returning the character and the index just past the escape.
-pub(crate) fn read_unicode_escape(chars: &[char], pos: usize) -> Option<(char, usize)> {
+/// Decodes the `\u{…}` (Rust, Swift) or `\uXXXX` (Kotlin) escape whose `u` is at `pos`, and returns
+/// the character with the index past the escape.
+pub fn read_unicode_escape(chars: &[char], pos: usize) -> Option<(char, usize)> {
 	let (start, end, next) = if chars.get(pos + 1) == Some(&'{') {
 		let close = pos + 2 + chars.get(pos + 2..)?.iter().position(|&c| c == '}')?;
 		(pos + 2, close, close + 1)
@@ -361,14 +327,10 @@ pub(crate) fn read_unicode_escape(chars: &[char], pos: usize) -> Option<(char, u
 	Some((char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?, next))
 }
 
-/// The tag a note must open with to be picked up, matching the `--add-comments=TRANSLATORS`
-/// the Rust scan passes to xgettext.
+/// Matches the `--add-comments=TRANSLATORS` that the Rust scan passes to `xgettext`.
 const COMMENT_TAG: &str = "TRANSLATORS";
 
-/// How many string-free lines may sit between a note and the call it describes.
-///
-/// A note is normally written directly above its `t(...)`, but a call split over several lines
-/// puts the opening line of the construct in between:
+/// How many lines may sit between a note and its call, as in:
 ///
 /// ```text
 /// // TRANSLATORS: Section heading
@@ -376,12 +338,10 @@ const COMMENT_TAG: &str = "TRANSLATORS";
 ///     t("General"),
 /// ```
 ///
-/// Only stepping over lines that hold no string literal is what keeps that safe: such a line
-/// can hold no other extractable message, so there is nothing between the note and this call
-/// that the note might have belonged to instead.
+/// Only lines with no string literal count. Such a line can't hold another message, so the note
+/// can't belong to anything else.
 const MAX_SKIPPED_WRAPPER_LINES: usize = 3;
 
-/// Maps every char index in `chars` to the zero-based line it falls on.
 fn line_of_each_char(chars: &[char]) -> Vec<usize> {
 	let mut out = Vec::with_capacity(chars.len() + 1);
 	let mut line = 0;
@@ -395,12 +355,9 @@ fn line_of_each_char(chars: &[char]) -> Vec<usize> {
 	out
 }
 
-/// The `TRANSLATORS:` note for the call starting on `line_index`, if it has one.
+/// Returns the `TRANSLATORS:` note for the call on `line_index`, if it has one.
 ///
-/// Reads the run of `//` lines immediately above (after stepping over at most
-/// [`MAX_SKIPPED_WRAPPER_LINES`] wrapper lines) and returns it, tag and all, when that run
-/// opens with [`COMMENT_TAG`]. A blank line ends the search, so an unrelated note further up
-/// cannot drift down onto a call it was never written for.
+/// A blank line ends the search, so that an unrelated note further up can't attach to this call.
 fn translators_comment_before(lines: &[&str], line_index: usize) -> Option<String> {
 	let mut cursor = line_index;
 	let mut skipped = 0;
@@ -415,7 +372,6 @@ fn translators_comment_before(lines: &[&str], line_index: usize) -> Option<Strin
 		skipped += 1;
 		cursor -= 1;
 	}
-	// Walking up collects bottom-up, so reverse to put the note back in reading order.
 	let mut block: Vec<&str> = Vec::new();
 	while cursor > 0 {
 		let Some(text) = lines[cursor - 1].trim().strip_prefix("//") else {
@@ -428,11 +384,7 @@ fn translators_comment_before(lines: &[&str], line_index: usize) -> Option<Strin
 	if block.first()?.starts_with(COMMENT_TAG) { Some(block.join("\n")) } else { None }
 }
 
-/// Extract every `t("literal")` value from `content`, each with the `TRANSLATORS:` note
-/// written above it, if any.
-///
-/// Ignores `t(` when preceded by an alphanumeric character or underscore (e.g.
-/// `stateDescription`).
+// `preceded_by_ident` keeps a name that ends in `t`, such as `stateDescription(`, from matching.
 fn extract_t_strings(content: &str) -> Vec<(String, Option<String>)> {
 	let chars: Vec<char> = content.chars().collect();
 	let lines: Vec<&str> = content.lines().collect();
@@ -456,10 +408,6 @@ fn extract_t_strings(content: &str) -> Vec<(String, Option<String>)> {
 	out
 }
 
-/// Extract every `nt("singular", "plural", ...)` call's literal pair from `content`,
-/// each with the `TRANSLATORS:` note written above it, if any. Ignores the third (count)
-/// argument entirely; only the first two string literals matter. Same identifier-boundary rule
-/// as [`extract_t_strings`].
 fn extract_nt_strings(content: &str) -> Vec<(String, String, Option<String>)> {
 	let chars: Vec<char> = content.chars().collect();
 	let lines: Vec<&str> = content.lines().collect();
@@ -492,12 +440,10 @@ fn extract_nt_strings(content: &str) -> Vec<(String, String, Option<String>)> {
 mod tests {
 	use super::*;
 
-	/// Just the extracted texts, for the cases that are not about the notes.
 	fn t_texts(src: &str) -> Vec<String> {
 		extract_t_strings(src).into_iter().map(|(s, _)| s).collect()
 	}
 
-	/// Just the singular/plural pairs, for the cases that are not about the notes.
 	fn nt_pairs(src: &str) -> Vec<(String, String)> {
 		extract_nt_strings(src).into_iter().map(|(a, b, _)| (a, b)).collect()
 	}
@@ -527,7 +473,6 @@ mod tests {
 
 	#[test]
 	fn skip_ident_suffix_t() {
-		// 't' preceded by 'x' in putText → not a t() call
 		let src = r#"putText("bad") t("good")"#;
 		let got = t_texts(src);
 		assert!(got.contains(&"good".to_string()));
@@ -553,7 +498,6 @@ mod tests {
 
 	#[test]
 	fn extract_nt_ignores_nt_suffix() {
-		// 'nt' preceded by 'x' in xnt(...) → not an nt() call.
 		let src = r#"xnt("bad", "worse", n) nt("good", "goods", n)"#;
 		assert_eq!(nt_pairs(src), vec![("good".to_string(), "goods".to_string())]);
 	}
@@ -607,7 +551,6 @@ mod tests {
 		let got = extract_nt_strings(src);
 		assert_eq!(got[0].2.as_deref(), Some("TRANSLATORS: {} is the match count"));
 	}
-	/// A temporary directory holding one source file, removed when the test ends.
 	struct SourceDir {
 		dir: std::path::PathBuf,
 	}
@@ -633,9 +576,6 @@ mod tests {
 		}
 	}
 
-	/// A string both front ends use is written once, by whichever scan ran first. The second
-	/// scan has to mark it as its own too, or dropping the string from the first front end takes
-	/// it away from the second as well.
 	#[test]
 	fn a_string_another_scan_already_wrote_gains_this_scan_s_reference() {
 		let src = SourceDir::with(
@@ -666,8 +606,6 @@ msgid \"Settings exported\""
 		assert_eq!(after.matches("msgid \"Settings exported\"").count(), 1, "and not a second copy of it");
 	}
 
-	/// The other half of the same story: with both references on the entry, the front end that
-	/// stopped using the string takes only its own reference away.
 	#[test]
 	fn a_shared_entry_keeps_the_other_scan_s_reference() {
 		let src = SourceDir::with(
@@ -757,7 +695,6 @@ msgid \"Shared\""
 		);
 	}
 
-	/// A pot holding one Rust-owned entry and one `kt` entry, both without notes.
 	fn pot_with_a_kt_entry() -> String {
 		String::from("msgid \"\"\nmsgstr \"\"\n\nmsgid \"Rust\"\nmsgstr \"\"\n\n#: kt\nmsgid \"Cancel\"\nmsgstr \"\"\n")
 	}

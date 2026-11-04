@@ -1,11 +1,7 @@
-//! Generating the per-platform translation assets the mobile apps consume: iOS
-//! `Localizable.strings` files and Android translation JSON, both from the same `.po` files.
-
-use std::{error, fs, path::Path};
+use std::{error, fmt::Write as _, fs, path::Path};
 
 use crate::po;
 
-/// Parse a gettext `.po` file and return `(msgid, msgstr)` pairs where `msgstr` is non-empty.
 fn parse_po_entries(content: &str) -> Vec<(String, String)> {
 	po::PoDocument::parse(content)
 		.entries
@@ -28,10 +24,12 @@ fn escape_for_localizable_strings(s: &str) -> String {
 	out
 }
 
-/// Generate `<lang>.lproj/Localizable.strings` files for iOS from `.po` translation files.
+/// Writes the translated strings of each `<lang>.po` in `po_dir` to
+/// `<ios_dir>/<lang>.lproj/Localizable.strings`.
 ///
-/// For each `<lang>.po` in `po_dir`, creates `<ios_dir>/<lang>.lproj/Localizable.strings`
-/// containing only translated (non-empty msgstr) entries. Call this from the iOS build step.
+/// # Errors
+///
+/// Returns an error if a file can't be read or written.
 pub fn gen_ios_strings(po_dir: impl AsRef<Path>, ios_dir: impl AsRef<Path>) -> Result<(), Box<dyn error::Error>> {
 	let po_dir = po_dir.as_ref();
 	let ios_dir = ios_dir.as_ref();
@@ -55,11 +53,12 @@ pub fn gen_ios_strings(po_dir: impl AsRef<Path>, ios_dir: impl AsRef<Path>) -> R
 		let out_path = lproj.join("Localizable.strings");
 		let mut out = String::new();
 		for (msgid, msgstr) in &translations {
-			out.push_str(&format!(
-				"\"{}\" = \"{}\";\n",
+			let _ = writeln!(
+				out,
+				"\"{}\" = \"{}\";",
 				escape_for_localizable_strings(msgid),
 				escape_for_localizable_strings(msgstr)
-			));
+			);
 		}
 		let existing = fs::read_to_string(&out_path).unwrap_or_default();
 		if existing != out {
@@ -70,11 +69,12 @@ pub fn gen_ios_strings(po_dir: impl AsRef<Path>, ios_dir: impl AsRef<Path>) -> R
 	Ok(())
 }
 
-/// Generate `translations/<lang>.json` asset files for Android from `.po` translation files.
+/// Writes the translated strings of each `<lang>.po` in `po_dir` to
+/// `<assets_dir>/translations/<lang>.json`, as an object that maps each msgid to its translation.
 ///
-/// For each `<lang>.po` in `po_dir`, creates `<assets_dir>/translations/<lang>.json`
-/// with `{"msgid": "msgstr"}` entries for all translated strings. Call this from the Android
-/// build step so the APK bundles the translations as assets.
+/// # Errors
+///
+/// Returns an error if a file can't be read or written.
 pub fn gen_android_strings(
 	po_dir: impl AsRef<Path>,
 	assets_dir: impl AsRef<Path>,

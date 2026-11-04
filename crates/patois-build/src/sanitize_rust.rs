@@ -1,17 +1,9 @@
-//! `.pot` generation shells out to `xgettext --language=C` to scan Rust source, xgettext
-//! having no Rust mode of its own. C's tokenizer doesn't understand two extremely common
-//! pieces of Rust syntax: lifetimes (`'a`, `'static`, `'_`) and raw strings (`r"..."`,
-//! `r#"..."#`). It sees the lone `'` of a lifetime and starts scanning for a closing quote,
-//! or sees `r#"` and doesn't recognize the `#`-delimited terminator, and in both cases runs
-//! on past the real end of the construct — sometimes swallowing or splicing together
-//! unrelated strings/comments later in the file (or even in a later file, since every file is
-//! fed to one `xgettext` invocation).
+//! Prepares Rust source for `xgettext --language=C`, because `xgettext` has no Rust mode.
 //!
-//! This neutralizes both constructs before the source ever reaches `xgettext`, while leaving
-//! actual double-quoted string literals (bar their `\u{…}` escapes) and `//`/`/* */` comments untouched
-//! (comments matter here since `// TRANSLATORS:` lines must survive verbatim). Replacements are
-//! always same-length-per-line (characters become spaces, newlines stay newlines), so line
-//! numbers — and therefore comment-to-string adjacency — never shift.
+//! The C tokenizer reads past the end of a lifetime or a raw string, which can swallow or splice
+//! strings later in the file, and in later files, since they all go to one `xgettext` run. This
+//! module blanks both constructs. Replacements keep the line structure, so a `// TRANSLATORS:` note
+//! stays next to its string.
 
 use crate::extract::read_unicode_escape;
 
@@ -105,8 +97,7 @@ pub fn sanitize_for_xgettext(src: &str) -> String {
 	out
 }
 
-/// If `chars[i]` is `'r'` starting a raw string (`r"`, `r#"`, `r##"`, ...), return the hash count.
-fn raw_string_hash_count(chars: &[char], i: usize) -> Option<usize> {
+const fn raw_string_hash_count(chars: &[char], i: usize) -> Option<usize> {
 	let n = chars.len();
 	let mut j = i + 1;
 	let mut hashes = 0usize;
@@ -117,8 +108,6 @@ fn raw_string_hash_count(chars: &[char], i: usize) -> Option<usize> {
 	if j < n && chars[j] == '"' { Some(hashes) } else { None }
 }
 
-/// Consume (and blank) the body of a raw string starting right after its opening delimiter,
-/// stopping once the matching `"` + `hashes` `#`s closer is found (also blanked).
 fn blank_raw_string_body(chars: &[char], i: &mut usize, hashes: usize, out: &mut String) {
 	let n = chars.len();
 	while *i < n {
@@ -146,9 +135,9 @@ fn blank_raw_string_body(chars: &[char], i: &mut usize, hashes: usize, out: &mut
 	}
 }
 
-/// If `chars[i]` is a `'` starting a plausible short char literal (`'x'`, `'\n'`, `'\''`,
-/// `'\u{2603}'`), return the index of its closing `'`. Otherwise `None` — it's a lifetime.
-fn char_literal_end(chars: &[char], i: usize) -> Option<usize> {
+/// Returns the index of the closing quote if the `'` at `i` opens a char literal, or `None` if it's
+/// a lifetime.
+const fn char_literal_end(chars: &[char], i: usize) -> Option<usize> {
 	let n = chars.len();
 	let mut j = i + 1;
 	if j >= n {

@@ -1,90 +1,79 @@
-//! Programmatic, position-preserving editing of `.po` files: find entries that still need a
-//! translation, patch a translated string into just that entry's `msgstr`, and re-render the
-//! file with everything else byte-for-byte untouched. Generic gettext-format logic with no
-//! opinion on where a translation comes from (DeepL, a human, anything else).
+//! Edits `.po` files in place.
+//!
+//! Finds the entries that need a translation and writes results into only those entries, so every
+//! other line of the file stays exactly as it was.
 
 use std::ops::Range;
 
 use crate::entries::{po_unescape, pot_escape};
 
-/// A translated result headed for one entry.
+/// A translation to write to one entry.
 ///
-/// The two shapes are separate variants rather than a `Vec` that happens to have one element,
-/// so a caller can't hand a plural entry a single string (collapsing `msgstr[0..n]` into one
-/// `msgstr` and breaking the entry) without saying so explicitly.
+/// The variants are separate so that a caller can't write one string to a plural entry by accident,
+/// which would collapse its `msgstr[N]` lines into one `msgstr`.
 pub enum Translation {
+	/// The translation of an ordinary entry.
 	Singular(String),
-	/// One string per plural form, in index order: `msgstr[0]` first. How many there should be
-	/// is [`PoDocument::nplurals`].
+	/// One string for each plural form, starting with `msgstr[0]`. [`PoDocument::nplurals`] gives
+	/// the number of forms.
 	Plural(Vec<String>),
 }
 
-/// A single `msgid`/`msgstr` entry, plus the exact line ranges in the source file needed
-/// to patch it in place without disturbing anything else (header metadata, TRANSLATORS
-/// comments, spacing, other entries).
+/// One entry of a `.po` file.
 pub struct PoEntryLoc {
+	/// The source string. It's empty for the header entry.
 	pub msgid: String,
+	/// The translation of an ordinary entry. It's empty for a plural entry.
 	pub msgstr: String,
-	/// The `msgid_plural` text, for a plural entry. `None` for an ordinary one, and the thing
-	/// to branch on when you need to tell them apart.
+	/// The plural source string of a plural entry, or `None` for an ordinary entry.
 	pub msgid_plural: Option<String>,
-	/// The `msgstr[N]` values in index order, for a plural entry. Empty for an ordinary one,
-	/// whose single translation lives in [`Self::msgstr`].
-	///
-	/// How many there are is a property of the target language, not of the string: the
-	/// `nplurals` in the file's `Plural-Forms` header (see [`PoDocument::nplurals`]) says how
-	/// many the language has, and Russian's three are as normal as French's two.
+	/// The `msgstr[N]` values of a plural entry, in order. It's empty for an ordinary entry.
 	pub msgstr_plural: Vec<String>,
-	/// The `#.` note above the entry, as gettext writes it for a `TRANSLATORS:` comment in the
-	/// source, with the lines of a run joined by a space and the marker itself dropped. `None`
-	/// where the entry has no note.
+	/// The `#.` note above the entry, without the `TRANSLATORS:` tag. The lines of a longer note
+	/// are joined by spaces.
 	pub comment: Option<String>,
+	/// Whether the entry has the `fuzzy` flag.
 	pub is_fuzzy: bool,
-	/// Whether this entry carries a `#|` "previous msgid" comment, `msgmerge` writes one
-	/// exactly when *it* just fuzzy-matched this entry against a changed source string.
-	/// An entry can also be fuzzy without one: that's how [`PoDocument::apply_all`] leaves an
-	/// entry after machine-translating it (flagged for human review, but with nothing left
-	/// to compare against). Distinguishing the two matters for
-	/// [`PoDocument::needs_translation`], otherwise a machine-translated entry would look
-	/// exactly like a freshly-changed one and get re-translated every single run forever.
+	/// Whether the entry has a `#|` comment, which `msgmerge` writes when it matches an entry to a
+	/// changed source string.
+	///
+	/// A fuzzy entry without one is a machine translation, as [`PoDocument::apply`] leaves it.
+	/// [`PoDocument::needs_translation`] relies on the difference, because otherwise it would ask
+	/// for a machine translation again on every run.
 	pub has_prev_msgid: bool,
-	/// Range of `#,`/`#|` lines immediately preceding `msgid` (empty range at the msgid
-	/// line itself when there's no existing flag/prev-msgid block to replace, inserting
-	/// into an empty range is just an insert, not a removal).
+	/// The `#,` and `#|` lines above the msgid, or an empty range at the msgid if there are none.
 	flag_block: Range<usize>,
-	/// Range of the full `msgstr "..."` statement, including any continuation lines.
 	msgstr_range: Range<usize>,
 }
 
-/// An entry `msgmerge` retired as obsolete (`#~`) because its msgid left the template, which is
-/// still the best translation there is of a string that comes back with the same words.
+/// An entry that `msgmerge` marked obsolete (`#~`) because its msgid left the template. It's still
+/// the best translation of a string that comes back with the same words.
 ///
-/// Only ordinary entries are kept: a plural, or one with a `msgctxt`, is not the same string as an
-/// ordinary entry with its words.
+/// Plural entries and entries with a `msgctxt` aren't kept, because they aren't the same string as
+/// an ordinary entry with the same words.
 pub struct ObsoleteEntry {
+	/// The source string.
 	pub msgid: String,
+	/// The translation.
 	pub msgstr: String,
+	/// Whether the entry has the `fuzzy` flag.
 	pub is_fuzzy: bool,
 }
 
-/// A parsed `.po` file, kept as its original lines so entries that aren't touched are
-/// re-rendered byte-for-byte identical to the source.
+/// A parsed `.po` file.
 ///
-/// Plural entries (`msgid_plural`/`msgstr[N]`) are parsed like any other, but kept on their own
-/// track: [`Self::needs_translation`] and [`Self::apply_all`] deal only in single strings and
-/// skip them, while [`Self::needs_plural_translation`] and [`Translation::Plural`] carry the
-/// whole set of forms. Writing one string into a plural entry would collapse `msgstr[0..n]`
-/// into a single `msgstr` and quietly destroy the entry, so the two are kept apart by type
-/// rather than by remembering to check.
+/// The document keeps the original lines, so [`Self::render`] reproduces every entry that wasn't
+/// changed exactly.
 pub struct PoDocument {
 	lines: Vec<String>,
+	/// The entries of the file, including the header entry.
 	pub entries: Vec<PoEntryLoc>,
-	/// The `#~` entries, which are never translation candidates and never patched. See
-	/// [`ObsoleteEntry`].
+	/// The `#~` entries, which are never candidates for translation and never changed.
 	pub obsolete: Vec<ObsoleteEntry>,
 }
 
 impl PoDocument {
+	/// Parses the text of a `.po` file.
 	#[must_use]
 	pub fn parse(content: &str) -> Self {
 		let lines: Vec<String> = content.lines().map(str::to_string).collect();
@@ -112,8 +101,6 @@ impl PoDocument {
 			if trimmed.starts_with('#') {
 				if let Some(note) = trimmed.strip_prefix("#.") {
 					let note = note.trim();
-					// `TRANSLATORS:` marks the note for whoever reads the catalog; what follows
-					// it is the note itself.
 					pending_comment.push(note.strip_prefix("TRANSLATORS:").unwrap_or(note).trim().to_string());
 				} else if trimmed.starts_with("#,") {
 					flag_line = Some(i);
@@ -141,20 +128,16 @@ impl PoDocument {
 				msgid.push_str(&po_unescape(lines[i].trim_start()));
 				i += 1;
 			}
-			// A `msgid_plural` line, when there is one, sits between the msgid and the
-			// translations and decides which of the two shapes follows: one `msgstr`, or a
-			// run of `msgstr[N]`.
-			let mut msgid_plural = None;
-			if i < lines.len() && lines[i].trim_start().starts_with("msgid_plural ") {
-				let rest = lines[i].trim_start().strip_prefix("msgid_plural ").unwrap().to_string();
-				let mut plural = po_unescape(&rest);
-				i += 1;
-				while i < lines.len() && lines[i].trim_start().starts_with('"') {
-					plural.push_str(&po_unescape(lines[i].trim_start()));
+			let msgid_plural =
+				lines.get(i).and_then(|line| line.trim_start().strip_prefix("msgid_plural ")).map(|rest| {
+					let mut plural = po_unescape(rest);
 					i += 1;
-				}
-				msgid_plural = Some(plural);
-			}
+					while i < lines.len() && lines[i].trim_start().starts_with('"') {
+						plural.push_str(&po_unescape(lines[i].trim_start()));
+						i += 1;
+					}
+					plural
+				});
 			let parsed = if msgid_plural.is_some() {
 				read_plural_msgstrs(&lines, &mut i).map(|(forms, range)| (String::new(), forms, range))
 			} else {
@@ -187,12 +170,9 @@ impl PoDocument {
 		Self { lines, entries, obsolete }
 	}
 
-	/// Entries that still need a translation: blank `msgstr`, or fuzzy *because `msgmerge`
-	/// just changed it* (has a `#|` previous-msgid comment, see
-	/// [`PoEntryLoc::has_prev_msgid`]). A fuzzy entry with no `#|` is one already
-	/// machine-translated on a prior run and left flagged for human review; treating that
-	/// as a candidate too would re-translate the same unchanged text forever. The header
-	/// entry (`msgid ""`) is never a candidate.
+	/// Returns the index and msgid of each ordinary entry that needs a translation: one with a
+	/// blank `msgstr`, or one that `msgmerge` just matched to a changed source string. See
+	/// [`PoEntryLoc::has_prev_msgid`].
 	pub fn needs_translation(&self) -> impl Iterator<Item = (usize, &str)> {
 		self.entries
 			.iter()
@@ -205,11 +185,10 @@ impl PoDocument {
 			.map(|(i, e)| (i, e.msgid.as_str()))
 	}
 
-	/// Plural entries that still need translating, as `(index, msgid, msgid_plural)`.
+	/// Returns the index, msgid, and `msgid_plural` of each plural entry that needs a translation.
 	///
-	/// The same rule as [`Self::needs_translation`], with "blank" meaning any form is blank:
-	/// a language with three forms and only two filled in is as untranslated as one with none,
-	/// and gettext falls back to the msgid for the missing slot.
+	/// The rule is the same as for [`Self::needs_translation`], and an entry with any blank form
+	/// counts as blank, because gettext shows English for that form.
 	pub fn needs_plural_translation(&self) -> impl Iterator<Item = (usize, &str, &str)> {
 		self.entries.iter().enumerate().filter_map(|(i, e)| {
 			let plural = e.msgid_plural.as_deref()?;
@@ -222,9 +201,9 @@ impl PoDocument {
 		})
 	}
 
-	/// The `nplurals=N` value from the file's `Plural-Forms` header, which is how many forms
-	/// this language wants. `None` when the header is absent or unparsable, which is a reason
-	/// to leave the file's plurals alone rather than guess at two.
+	/// Returns the `nplurals` value of the `Plural-Forms` header, or `None` if the header is
+	/// missing or invalid. In that case, leave the file's plural entries alone rather than guess
+	/// the number of forms.
 	#[must_use]
 	pub fn nplurals(&self) -> Option<usize> {
 		let header = self.entries.iter().find(|e| e.msgid.is_empty())?;
@@ -234,38 +213,28 @@ impl PoDocument {
 		digits.parse().ok().filter(|n| *n > 0)
 	}
 
-	/// Applies a batch of `(entry index, translated text)` results: for each entry, the
-	/// existing `#,`/`#|` block (if any) collapses to a plain `#, fuzzy` line and the
-	/// `msgstr` is replaced. Everything else in the file is untouched. All ranges are
-	/// computed against the original parse, so patches are applied bottom-up in one pass
-	/// to keep earlier ranges valid.
+	/// Writes single-string translations, each with its entry index, and flags those entries fuzzy.
 	pub fn apply_all(&mut self, translations: &[(usize, String)]) {
 		let owned: Vec<(usize, Translation)> =
 			translations.iter().map(|(i, t)| (*i, Translation::Singular(t.clone()))).collect();
 		self.apply(&owned);
 	}
 
-	/// Applies a batch of results, singular or plural.
+	/// Writes translations, each with its entry index, and flags those entries fuzzy.
 	///
-	/// One entry point for both shapes because the ranges are all computed against the original
-	/// parse: applying singulars and plurals in two passes would leave the second pass patching
-	/// line numbers the first pass had already shifted. Everything is collected, sorted from the
-	/// bottom of the file up, and spliced in one go.
-	///
-	/// A [`Translation::Plural`] aimed at an entry that has no `msgid_plural` is skipped rather
-	/// than written: it would replace the entry's single `msgstr` with a run of `msgstr[N]`
-	/// lines that gettext would reject against that msgid. The reverse is skipped for the same
-	/// reason.
+	/// Skips a translation whose shape doesn't match its entry, because gettext would reject the
+	/// result. Pass all the translations in one call: line numbers refer to the original parse, and
+	/// a first call would shift them for a second.
 	pub fn apply(&mut self, translations: &[(usize, Translation)]) {
 		let flagged: Vec<(usize, &Translation, bool)> = translations.iter().map(|(i, t)| (*i, t, true)).collect();
 		self.apply_flagged(&flagged);
 	}
 
-	/// Applies a batch of results like [`Self::apply`], each with whether to flag it fuzzy.
+	/// Writes translations like [`Self::apply`], each with whether to flag its entry fuzzy.
 	///
-	/// A result that is not flagged keeps the entry's other flags, such as `c-format`, and loses
-	/// any `#|` comment. That is for a translation a person already reviewed, such as one carried
-	/// over from an [`ObsoleteEntry`], which flagging fuzzy would wrongly mark as a guess.
+	/// A translation that isn't flagged keeps the entry's other flags and loses any `#|` comment.
+	/// Use this for a translation that a person already reviewed, such as one from an
+	/// [`ObsoleteEntry`].
 	pub fn apply_flagged(&mut self, translations: &[(usize, &Translation, bool)]) {
 		let mut ops: Vec<(Range<usize>, Vec<String>)> = Vec::new();
 		for &(idx, translated, fuzzy) in translations {
@@ -287,7 +256,6 @@ impl PoDocument {
 		}
 	}
 
-	/// The entry's `#,` line with `fuzzy` taken out, or nothing when that leaves no flags.
 	fn flags_without_fuzzy(&self, entry: &PoEntryLoc) -> Vec<String> {
 		let kept: Vec<&str> = self.lines[entry.flag_block.clone()]
 			.iter()
@@ -299,6 +267,7 @@ impl PoDocument {
 		if kept.is_empty() { Vec::new() } else { vec![format!("#, {}", kept.join(", "))] }
 	}
 
+	/// Returns the text of the file, with the translations that were written.
 	#[must_use]
 	pub fn render(&self) -> String {
 		let mut out = self.lines.join("\n");
@@ -307,9 +276,8 @@ impl PoDocument {
 	}
 }
 
-/// Reads one obsolete entry from its `#~` lines, with the marker taken off. `None` for a plural,
-/// one with a `msgctxt`, or anything without both a msgid and a msgstr. The `#~|` lines that hold
-/// a previous msgid start with `|`, so they are passed over.
+/// Reads one obsolete entry from its `#~` lines, without the marker. The `#~|` lines start with
+/// `|`, so they're passed over.
 fn parse_obsolete(block: &[&str], is_fuzzy: bool) -> Option<ObsoleteEntry> {
 	let mut msgid: Option<String> = None;
 	let mut msgstr: Option<String> = None;
@@ -331,8 +299,6 @@ fn parse_obsolete(block: &[&str], is_fuzzy: bool) -> Option<ObsoleteEntry> {
 	Some(ObsoleteEntry { msgid: msgid?, msgstr: msgstr?, is_fuzzy })
 }
 
-/// Reads a single `msgstr "..."` statement and its continuation lines, advancing `i` past it.
-/// `None` when the line isn't a `msgstr` at all, which means this wasn't a complete entry.
 fn read_msgstr(lines: &[String], i: &mut usize) -> Option<(String, Range<usize>)> {
 	if *i >= lines.len() || !lines[*i].trim_start().starts_with("msgstr ") {
 		return None;
