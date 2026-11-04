@@ -1,21 +1,21 @@
 //! Machine translation of gettext catalogs and Markdown readmes through the Claude API, for apps
 //! that use [patois](https://docs.rs/patois).
 //!
-//! [`translate`] syncs each `.po` file with the `.pot` through `msgmerge`, then asks Claude to
-//! fill the empty and fuzzy entries. Each request carries the `TRANSLATORS:` comment of each
-//! string, and each answer is checked with [`patois_build::check`], so a translation that drops
-//! a placeholder, an accelerator, or a shortcut is never written. It can also translate a readme
-//! into `readme-<lang>.md` files, one section at a time.
+//! [`translate`] syncs each `.po` file with the `.pot` through `msgmerge`, and then asks Claude to
+//! fill the blank entries. Each request includes the `TRANSLATORS:` note of each string, and each
+//! answer goes through [`patois_build::check`], so a translation that loses a placeholder, an
+//! accelerator, or a shortcut is never written. The function can also translate a readme into
+//! `readme-<lang>.md` files, one section at a time.
 //!
-//! Call it from an xtask after regenerating the `.pot`. It needs `msgmerge` from gettext, and an
-//! `ANTHROPIC_API_KEY` unless it's a dry run. Set `PATOIS_TRANSLATE_MODEL` to use a model other
-//! than the default.
+//! Call it from an `xtask` after you regenerate the `.pot`. It needs `msgmerge` from gettext and,
+//! unless it's a dry run, an `ANTHROPIC_API_KEY`. To use a model other than the default, set
+//! `PATOIS_TRANSLATE_MODEL`.
 //!
-//! Two optional files in the `.po` folder change what it does:
+//! Two optional files in the `.po` directory change what it does:
 //!
-//! - `human-maintained-locales.txt`: locales that people translate, one per line, which it
-//!   skips.
-//! - `style/<lang>.md`: conventions for one language, added to its instructions.
+//! - `human-maintained-locales.txt`: locales that people translate, one per line. The function
+//!   skips them.
+//! - `style/<lang>.md`: conventions for one language, which are added to its instructions.
 
 use std::{
 	collections::{HashMap, HashSet},
@@ -38,56 +38,57 @@ mod readme;
 mod terms;
 mod update;
 
-/// What the model is told about the app.
+/// The app that the model translates for.
 #[derive(Debug, Clone, Default)]
 pub struct App {
-	/// The app's name, such as `Paperback`.
+	/// The name of the app, such as `Paperback`.
 	pub name: String,
-	/// What the app is, to complete "the user interface of Paperback, …", such as `a desktop
-	/// ebook and document reader used heavily with screen readers`.
+	/// A description that completes "the user interface of Paperback, …", such as `a desktop ebook
+	/// and document reader used heavily with screen readers`.
 	pub description: String,
 	/// Names to leave untranslated besides the app's own, such as `EPUB` and `PDF`. File
 	/// extensions and URLs are always left alone.
 	pub proper_nouns: Vec<String>,
 }
 
-/// Where a project keeps its translations. The paths other than `root` are relative to it.
+/// Where a project keeps its translations. The paths other than `root` are relative to `root`.
 #[derive(Debug, Clone)]
 pub struct Project<'a> {
+	/// The root directory of the project.
 	pub root: &'a Path,
-	/// The folder with the `.po` files, such as `po`.
+	/// The directory with the `.po` files, such as `po`.
 	pub po_dir: &'a Path,
 	/// The template, such as `po/myapp.pot`.
 	pub pot: &'a Path,
-	/// The English readme to translate into `<stem>-<lang>.md` beside it, such as
-	/// `doc/readme.md`.
+	/// The English readme to translate into `<stem>-<lang>.md` next to it, such as `doc/readme.md`.
 	pub readme: Option<&'a Path>,
+	/// The app that the strings belong to.
 	pub app: App,
 }
 
-/// What a run does.
+/// Options for [`translate`].
 #[derive(Debug, Clone, Copy, Default)]
 #[allow(clippy::struct_excessive_bools, reason = "these are independent switches")]
 pub struct Options {
 	/// Reports what would be translated, without calling the API or changing a file.
 	pub dry_run: bool,
-	/// Also translates again the entries whose translation dropped or added a placeholder, an
+	/// Also translates again the entries whose translation lost or added a placeholder, an
 	/// accelerator, or a shortcut.
 	pub repair: bool,
 	/// Also translates again the machine translations that are shared with a string that says
-	/// something different, which `msgmerge` copies in. Meant to run once, not on every run.
+	/// something different. `msgmerge` can copy these in. Use this option once, not on every run.
 	pub repair_copies: bool,
 }
 
 /// Translates every `.po` file of `project` that isn't human-maintained, then its readme.
 ///
-/// A file is written only when its content changed, not when `msgmerge` only updated the
-/// timestamps in its header.
+/// A file is written only if its content changed, not if `msgmerge` updated only the timestamps in
+/// its header.
 ///
 /// # Errors
 ///
-/// Returns an error when `ANTHROPIC_API_KEY` isn't set outside a dry run, when a file can't be
-/// read or written, when an API request fails, or when a readme section comes back incomplete.
+/// Returns an error if `ANTHROPIC_API_KEY` isn't set outside a dry run, if a file can't be read or
+/// written, if an API request fails, or if a readme section comes back incomplete.
 pub fn translate(project: &Project, options: Options) -> Result<(), Box<dyn Error>> {
 	let client = if options.dry_run {
 		None
@@ -125,8 +126,6 @@ pub fn translate(project: &Project, options: Options) -> Result<(), Box<dyn Erro
 	readme::sync_readmes(project, &auto_langs, client.as_ref(), options.dry_run)
 }
 
-/// The `TRANSLATORS:` note of each msgid in `pot` that has one, which is the difference between
-/// translating "Open" as a verb and as an adjective.
 fn translator_comments(pot: &str) -> HashMap<String, String> {
 	PoDocument::parse(pot)
 		.entries
@@ -150,8 +149,6 @@ fn parse_human_maintained_locales(content: &str) -> HashSet<String> {
 		.collect()
 }
 
-/// The conventions a locale's translators wrote for the model in `style/<lang>.md`, or `None`
-/// when there's no such file or it's blank.
 fn load_style_note(project: &Project, lang: &str) -> Option<String> {
 	let path = project.root.join(project.po_dir).join("style").join(format!("{lang}.md"));
 	parse_style_note(&fs::read_to_string(path).ok()?)
@@ -173,10 +170,8 @@ fn style_note_suffix(project: &Project, lang: &str, present: bool) -> String {
 	}
 }
 
-/// What to splice into a document: the entry index and its translated result.
 type Applied = Vec<(usize, Translation)>;
 
-/// Translates the ordinary entries, returning what to apply and how many carried a note.
 fn translate_singulars(
 	client: &claude::ClaudeClient,
 	target: &claude::Target,
@@ -201,7 +196,6 @@ fn translate_singulars(
 	Ok((applied, annotated))
 }
 
-/// Translates the plural entries, asking for `nplurals` forms of each.
 fn translate_plurals(
 	client: &claude::ClaudeClient,
 	target: &claude::Target,
@@ -231,8 +225,6 @@ fn translate_plurals(
 		.collect())
 }
 
-/// The `nplurals` count and the raw plural rule from a `.po` file's `Plural-Forms` header, so
-/// the model gets the language's actual rule.
 fn plural_forms(content: &str) -> Option<(usize, String)> {
 	let nplurals = PoDocument::parse(content).nplurals()?;
 	let line = content.lines().map(str::trim).find(|l| l.contains("Plural-Forms:"))?;
@@ -240,10 +232,7 @@ fn plural_forms(content: &str) -> Option<(usize, String)> {
 	Some((nplurals, rule))
 }
 
-/// Adds the entries whose translation is damaged to the candidates, returning how many.
-///
-/// Only entries that fail a mechanical check are added. Translating again on suspicion would
-/// change thousands of good entries.
+/// Adds the entries whose translation is damaged to the candidates, and returns how many.
 fn add_damaged_entries(
 	doc: &PoDocument,
 	candidates: &mut Vec<(usize, String)>,
@@ -272,12 +261,11 @@ fn add_damaged_entries(
 	count
 }
 
-/// Adds the fuzzy entries whose translation is shared with an entry whose English says
-/// something different, returning how many. These are usually copies `msgmerge` made from a
-/// similar string.
+/// Adds the fuzzy entries whose translation is shared with an entry whose English says something
+/// different, and returns how many.
 ///
-/// Only fuzzy entries, because a person wrote the others, and a shared translation isn't enough
-/// reason to replace their work.
+/// Only fuzzy entries qualify, because a person wrote the others, and a shared translation isn't
+/// enough reason to replace their work.
 fn add_copied_entries(doc: &PoDocument, candidates: &mut Vec<(usize, String)>) -> usize {
 	let already: HashSet<usize> = candidates.iter().map(|(i, _)| *i).collect();
 	let mut sources: HashMap<&str, HashSet<String>> = HashMap::new();
@@ -297,8 +285,8 @@ fn add_copied_entries(doc: &PoDocument, candidates: &mut Vec<(usize, String)>) -
 	count
 }
 
-/// The words of an English string, without accelerators, case, spaces, and end punctuation. Two
-/// strings with the same key say the same thing, so they can share a translation.
+/// Returns the words of a string, without accelerators, case, spaces, and end punctuation. Two
+/// strings with the same key can share a translation.
 fn same_meaning_key(msgid: &str) -> String {
 	msgid
 		.chars()
@@ -307,19 +295,16 @@ fn same_meaning_key(msgid: &str) -> String {
 		.collect()
 }
 
-/// Fills each blank entry from an obsolete one with the same words, returning the file with them
-/// filled and how many there were.
+/// Fills each blank entry from an obsolete entry with the same words, and returns the new file and
+/// the number of entries filled.
 ///
-/// A string often changes only where its accelerator sits, as when a menu is rearranged so its
-/// items stop sharing a letter. `--no-fuzzy-matching` retires the old entry and leaves the new one
-/// blank, so without this the translation a person wrote is thrown away and the string translated
-/// afresh. It keeps its own accelerator, which its translator chose for that language, and stays
-/// fuzzy only if it already was. A person's translation wins over a machine's when both are there,
-/// and one that fails the placeholder or accelerator check is not used.
+/// A string often changes only where its accelerator sits. `--no-fuzzy-matching` retires the old
+/// entry and leaves the new one blank, which would discard a translation that a person wrote. The
+/// restored translation keeps its own accelerator, which its translator chose for that language.
 fn restore_obsolete(content: String) -> (String, usize) {
 	let mut doc = PoDocument::parse(&content);
 	let mut found: HashMap<String, Vec<(String, bool)>> = HashMap::new();
-	// People's translations first, so they are the ones found first.
+	// A person's translation wins over a machine's.
 	let mut obsolete: Vec<_> = doc.obsolete.iter().filter(|entry| !entry.msgstr.is_empty()).collect();
 	obsolete.sort_by_key(|entry| entry.is_fuzzy);
 	for entry in obsolete {
@@ -353,12 +338,11 @@ fn translate_one(
 	let lang = po_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
 	let style = load_style_note(project, &lang);
 	let original = fs::read_to_string(po_path)?;
-	// A copy, so the file is written only when something really changed.
+	// msgmerge works on a copy, so that the real file changes only if its content does.
 	let tmp = env::temp_dir().join(format!("patois-translate-{lang}-{}.po", process::id()));
 	fs::write(&tmp, &original)?;
 	// Without `--no-fuzzy-matching`, msgmerge gives a new string the translation of the most
-	// similar old one, marked fuzzy. Apps that compile fuzzy entries then show that guess, and
-	// nothing marks it reliably afterwards. With it, a new string arrives empty and is translated.
+	// similar old one, and fuzzy entries reach the app, so users would see that guess.
 	let merged_ok = Command::new("msgmerge")
 		.args(["--update", "--backup=none", "--no-wrap", "--no-fuzzy-matching"])
 		.arg(&tmp)
@@ -443,8 +427,7 @@ fn translate_one(
 	Ok(())
 }
 
-/// `content` without the `POT-Creation-Date` and `PO-Revision-Date` header lines, which
-/// `msgmerge` changes on every run.
+// `msgmerge` changes these two header lines on every run.
 fn content_without_volatile_headers(content: &str) -> String {
 	content
 		.lines()
@@ -570,9 +553,6 @@ mod tests {
 		assert!(copied(&doc).is_empty());
 	}
 
-	/// Paperback's menus were rearranged so no two items share an accelerator, which moved the
-	/// `&` in seventeen strings and nothing else. Every language lost its translation of all of
-	/// them, and the ones a person wrote were replaced with worse machine translations.
 	#[test]
 	fn a_string_whose_accelerator_moved_keeps_its_translation() {
 		let po = "msgid \"\"\nmsgstr \"Content-Type: text/plain; charset=UTF-8\\n\"\n\n#. TRANSLATORS: menu item\nmsgid \"&Toggle Bookmark\"\nmsgstr \"\"\n\nmsgid \"Go to li&ne...\"\nmsgstr \"\"\n\nmsgid \"&View\"\nmsgstr \"\"\n\n#~ msgid \"Toggle &Bookmark\"\n#~ msgstr \"&Lesezeichen umschalten\"\n\n#, fuzzy\n#~ msgid \"Go to &line...\"\n#~ msgstr \"Gehe zu &Zeile...\"\n";

@@ -1,6 +1,3 @@
-//! What each kind of request asks the model for: the system prompt that tells it the rules, and
-//! the schema its answer has to fit.
-
 use std::iter;
 
 use serde_json::{Value, json};
@@ -29,13 +26,8 @@ pub fn translations_schema() -> Value {
 	})
 }
 
-/// Schema for a plural batch.
-///
-/// The form count is deliberately not pinned here. The obvious spelling - `minItems`/`maxItems`
-/// set to `nplurals` - is rejected outright: the API supports `minItems` of 0 or 1 only, and a
-/// request asking for `[2, 5]` comes back as a 400 for the whole batch. So the schema asks only
-/// for a non-empty array of strings, the prompt states the exact count, and [`check_plural`]
-/// enforces it on the way back, which it has to do regardless.
+// The form count isn't in the schema, because the API accepts a `minItems` of only 0 or 1. The
+// prompt states the count, and `check_plural` enforces it.
 pub fn plural_schema() -> Value {
 	json!({
 		"type": "object",
@@ -62,29 +54,22 @@ pub fn plural_schema() -> Value {
 	})
 }
 
-/// The system prompt for a batch of single strings, with the target language's conventions
-/// appended when its translators wrote some (see `po/style/<lang>.md`).
 pub fn phrase_system_prompt(app: &App, style: Option<&str>) -> String {
 	with_style(&fill(include_str!("../prompts/phrase.md"), app), style)
 }
 
-/// The system prompt for a batch of plural messages; see [`phrase_system_prompt`].
 pub fn plural_system_prompt(app: &App, style: Option<&str>) -> String {
 	with_style(&fill(include_str!("../prompts/plural.md"), app), style)
 }
 
-/// The system prompt for a readme section; see [`phrase_system_prompt`].
 pub fn markdown_system_prompt(app: &App, style: Option<&str>) -> String {
 	with_style(&fill(include_str!("../prompts/markdown.md"), app), style)
 }
 
-/// The system prompt for updating a readme section whose English changed; see [`phrase_system_prompt`] and [`crate::update`].
 pub fn update_system_prompt(app: &App, style: Option<&str>) -> String {
 	with_style(&fill(include_str!("../prompts/update.md"), app), style)
 }
 
-/// A prompt template with the app's name, description, and proper nouns filled in. The app's
-/// name always leads the proper nouns.
 #[allow(clippy::literal_string_with_formatting_args, reason = "the templates are Markdown files, not format strings")]
 fn fill(template: &str, app: &App) -> String {
 	let proper_nouns: Vec<&str> =
@@ -107,8 +92,6 @@ fn with_style(base: &str, style: Option<&str>) -> String {
 mod tests {
 	use super::*;
 
-	// The count cannot live in the schema: the API takes minItems of 0 or 1 only, and rejects
-	// the whole request otherwise. check_plural is what enforces it.
 	#[test]
 	fn the_plural_schema_asks_only_for_a_non_empty_array() {
 		let schema = plural_schema();

@@ -1,23 +1,11 @@
 //! Machine translation through the Claude API.
 //!
-//! This replaces a dedicated machine-translation API, and the reason is not price. A
-//! translation endpoint takes a string and a target language and nothing else, which for a
-//! gettext catalog throws away most of what the catalog knows. Three things were being lost:
-//!
-//! - The `#. TRANSLATORS:` comments. Every one of them was written to disambiguate a string
-//!   that can't be translated correctly without it ("Ready" the status, not "Ready" the
-//!   button), and there was no field to put them in. There are ~30k characters of them.
-//! - The `&` accelerator markers. A translation API sees punctuation and drops or relocates
-//!   it, and nothing downstream checks: 216 of Russian's 251 accelerator strings had lost
-//!   theirs, so most of the Russian menu had no keyboard access at all.
-//! - The `\tCtrl+O` shortcut suffixes, which are UI wiring rather than prose and must survive
-//!   byte-for-byte.
-//!
-//! A model can be told about all three, and the checks at the bottom of this file verify it
-//! did rather than trusting it. Anything that fails a check is returned as `None` and left for
-//! the next run, which is the same contract the previous backend had for placeholder damage.
+//! A dedicated translation API takes only a string and a target language, which loses most of what
+//! a catalog knows: the `TRANSLATORS:` notes that disambiguate a string, the `&` accelerators, and
+//! the `\tCtrl+O` shortcuts. A model can be told about all three, and a check verifies each answer.
+//! A result that fails the check is returned as `None` and left for the next run.
 
-use std::{env, error::Error, thread, time::Duration};
+use std::{env, error::Error, fmt::Write as _, thread, time::Duration};
 
 use patois_build::check::{check, check_plural};
 use serde::Deserialize;
@@ -34,63 +22,41 @@ use crate::{
 };
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
-/// The API version header, which pins the request/response shape. Unrelated to the model.
 const API_VERSION: &str = "2023-06-01";
 
-/// Overridable with `PATOIS_TRANSLATE_MODEL`, e.g. `claude-opus-5` for a language the
-/// results look weak in.
-///
-/// Short UI strings with the rules stated up front, and a checked output, is squarely what the
-/// cheapest model is for: a full rebuild of all seven locales lands well under a dollar, and
-/// the accelerator, placeholder and shortcut checks below don't care which model produced the
-/// text. What a larger model buys here is phrasing, not correctness.
+/// Short strings with the rules stated up front and a checked result suit the cheapest model. A
+/// larger model buys better phrasing, not correctness.
 const DEFAULT_MODEL: &str = "claude-haiku-4-5";
 
-/// Strings per request. Well under what the model can hold; the point is to bound `max_tokens`
-/// and to lose only one batch, not a whole language, when a request fails.
+/// Keeps a failed request from losing more than one batch of a language.
 const BATCH_LIMIT: usize = 60;
 
-/// Plural entries are batched smaller: each one comes back as several forms rather than one
-/// string, so the same number of entries is several times the output tokens.
+/// Smaller than [`BATCH_LIMIT`] because each entry comes back as several forms.
 const PLURAL_BATCH_LIMIT: usize = 20;
 
-/// Source characters per README chunk. The README is split on section headings and sent a few
-/// sections at a time so no single response has to be enormous.
 const README_CHUNK_CHARS: usize = 6000;
 
 const MAX_TOKENS: u32 = 16000;
-/// How many times a readme chunk may come back missing headings or list items before the run
-/// fails. Two retries is enough for a model that dropped a section by accident; more than that
-/// and the chunk itself is the problem.
 const MARKDOWN_ATTEMPTS: usize = 3;
 
-/// Retries for the statuses that are worth retrying (429 and 5xx). Raw HTTP gets none of the
-/// automatic backoff the official SDKs have, so it is done here.
 const MAX_ATTEMPTS: u32 = 4;
 
-/// One string to translate, with whatever the catalog knows about it.
 pub struct Phrase {
 	pub source: String,
-	/// The `#. TRANSLATORS:` comment from the pot, when the string has one.
 	pub context: Option<String>,
 }
 
-/// One plural string to translate: the English singular and plural, and how many forms the
-/// target language wants back.
 pub struct PluralPhrase {
 	pub singular: String,
 	pub plural: String,
 	pub context: Option<String>,
 }
 
-/// The language a batch is translated into, and the conventions its translators wrote for the
-/// model, when they wrote any (see `po/style/<lang>.md`).
 pub struct Target<'a> {
 	pub language: &'a str,
 	pub style: Option<&'a str>,
 }
 
-/// What a readme section is translated with besides its English: the translation of its previous version, when there is one, and the interface's wording for the terms it names.
 #[derive(Default)]
 pub struct Guidance<'a> {
 	pub existing: Option<&'a str>,
@@ -103,16 +69,23 @@ pub struct ClaudeClient {
 	app: App,
 }
 
-/// The request's extra instructions for `guidance`, or nothing when it has none.
 fn guidance_text(guidance: &Guidance) -> String {
 	let mut text = String::new();
 	if !guidance.terms.is_empty() {
-		// Without these a re-translated section renamed menus: the Russian Go menu became «Меню навигации», which is on no screen, instead of the interface's «Переход».
-		text.push_str(&format!("\n\nThe app's interface already words these terms as follows. Where the document names one of them, such as a menu, a dialog, a button or an option, use exactly this wording. Where a term lists more than one, separated by \" / \", the interface uses each for a different control; use the one that fits what the document is describing:\n<interface_terms>\n{}\n</interface_terms>", guidance.terms));
+		// Without these, a translated section can give a menu a name that's on no screen.
+		let _ = write!(
+			text,
+			"\n\nThe app's interface already words these terms as follows. Where the document names one of them, such as a menu, a dialog, a button or an option, use exactly this wording. Where a term lists more than one, separated by \" / \", the interface uses each for a different control; use the one that fits what the document is describing:\n<interface_terms>\n{}\n</interface_terms>",
+			guidance.terms
+		);
 	}
 	if let Some(existing) = guidance.existing {
-		// Without this, one new line re-translated its whole section in fresh wording, undoing whatever the translation's reviewers had settled on.
-		text.push_str(&format!("\n\nThis document is a newer version of text that is already translated, and this is the existing translation of the whole section it belongs to. Update that translation instead of translating afresh: keep every heading, sentence and list item whose English meaning did not change exactly as the existing translation words it, and translate only what is new or changed. Return the translation of the document alone, not of the rest of the section.\n<existing_translation>\n{existing}\n</existing_translation>"));
+		// Without this, one new line rewords its whole section and undoes what reviewers settled
+		// on.
+		let _ = write!(
+			text,
+			"\n\nThis document is a newer version of text that is already translated, and this is the existing translation of the whole section it belongs to. Update that translation instead of translating afresh: keep every heading, sentence and list item whose English meaning did not change exactly as the existing translation words it, and translate only what is new or changed. Return the translation of the document alone, not of the rest of the section.\n<existing_translation>\n{existing}\n</existing_translation>"
+		);
 	}
 	text
 }
@@ -129,15 +102,7 @@ impl ClaudeClient {
 		&self.model
 	}
 
-	/// The `output_config` for a request, with `effort` included only where the model takes it.
-	///
-	/// `effort` is not universal: the Haiku tier rejects it outright with "This model does not
-	/// support the effort parameter", a 400 on every request rather than a warning. It is worth
-	/// setting on the models that do have it - it holds down thinking tokens on a task whose
-	/// rules are all supplied up front - but it has to be conditional, because the model is
-	/// configurable and the cheap default is exactly the one that refuses it.
-	/// Only the string batches use this. Every answer in one is a few words, which is what low
-	/// effort is for; the readme is asked for as text and has no `output_config` at all.
+	// Low effort holds down thinking tokens on a task whose rules are all given up front.
 	fn output_config(&self, format: &Value) -> Value {
 		let mut config = json!({ "format": format });
 		if supports_effort(&self.model) {
@@ -146,8 +111,7 @@ impl ClaudeClient {
 		config
 	}
 
-	/// Translates `phrases` into `target`'s language, in batches. Returns one result per input,
-	/// in order, with `None` where the result failed a check (see [`check`]).
+	/// Returns one result for each phrase, in order, with `None` where a result failed [`check`].
 	pub fn translate_phrases(
 		&self,
 		phrases: &[Phrase],
@@ -160,10 +124,8 @@ impl ClaudeClient {
 		Ok(out)
 	}
 
-	/// Builds the request body for one batch. Split out from the call so its shape can be
-	/// asserted in a test: a request that is subtly wrong (a misplaced `format`, a missing
-	/// `id`) otherwise only shows up as a 400 from a live call, which the test suite never
-	/// makes.
+	// Separate from the call so that a test can check its shape, since the test suite makes no live
+	// calls that would show a 400.
 	fn phrase_request(&self, phrases: &[Phrase], target: &Target) -> Result<Value, Box<dyn Error>> {
 		let items: Vec<Value> = phrases
 			.iter()
@@ -179,8 +141,7 @@ impl ClaudeClient {
 			"model": self.model,
 			"max_tokens": MAX_TOKENS,
 			"output_config": self.output_config(&json!({ "type": "json_schema", "schema": translations_schema() })),
-			// The rules are identical for every batch of one language, so they sit in a
-			// cacheable system block rather than being repeated in each user message.
+			// The rules are the same for every batch of a language, so they can be cached.
 			"system": [{
 				"type": "text",
 				"text": phrase_system_prompt(&self.app, target.style),
@@ -211,8 +172,7 @@ impl ClaudeClient {
 		let text = self.send(&request)?;
 		let payload: Payload = serde_json::from_str(&text)
 			.map_err(|e| format!("Claude returned a response that did not match the schema: {e} (body: {text})"))?;
-		// Keyed by id rather than zipped by position: the schema fixes the shape of each item
-		// but not that the array comes back complete or in order.
+		// By id, not position: the schema doesn't make the array complete or ordered.
 		let mut out: Vec<Option<String>> = vec![None; phrases.len()];
 		for item in payload.translations {
 			if let Some(slot) = out.get_mut(item.id) {
@@ -222,13 +182,6 @@ impl ClaudeClient {
 		Ok(out)
 	}
 
-	/// Translates plural strings, asking for `nplurals` forms of each.
-	///
-	/// Separate from [`Self::translate_phrases`] because the unit is different: one English
-	/// singular/plural pair goes in, and a whole set of forms comes back, as many as the target
-	/// language uses. That count is not a property of the string - Russian wants three where
-	/// French wants two - so it is read from the file's `Plural-Forms` header and passed in
-	/// rather than assumed.
 	pub fn translate_plurals(
 		&self,
 		phrases: &[PluralPhrase],
@@ -302,12 +255,6 @@ impl ClaudeClient {
 		Ok(out)
 	}
 
-	/// Translates a Markdown document, section by section, and reassembles it.
-	///
-	/// Markdown goes to the model as Markdown. The previous backend had to run the README
-	/// through `pandoc` into HTML, translate that, and convert it back, because its API had no
-	/// other way to protect code spans and fenced blocks from being translated; that round trip
-	/// is now just an instruction.
 	pub fn translate_markdown(
 		&self,
 		markdown: &str,
@@ -322,12 +269,9 @@ impl ClaudeClient {
 		Ok(restore_code_spans(markdown, &joined))
 	}
 
-	/// One chunk, translated and checked against its source, retried while it comes back short.
-	///
-	/// A chunk that fails the check is a chunk the model left something out of, and a second ask
-	/// usually gets it right. After [`MARKDOWN_ATTEMPTS`] tries this gives up loudly: half a
-	/// readme committed and opened as a pull request is worse than no readme, because nobody
-	/// reading the language it is in can tell which half is missing.
+	/// Translates one chunk and checks it against its source, and fails after
+	/// [`MARKDOWN_ATTEMPTS`] tries. Half a readme is worse than none, because nobody who reads that
+	/// language can tell which half is missing.
 	fn translate_markdown_checked(
 		&self,
 		markdown: &str,
@@ -337,9 +281,8 @@ impl ClaudeClient {
 		let mut last = String::new();
 		let mut last_text = String::new();
 		for attempt in 1..=MARKDOWN_ATTEMPTS {
-			// Each retry is told what was wrong with the attempt before it. A blind retry of the
-			// same request mostly returns the same answer: German dropped one of the six list
-			// items under "File menu" on three identical tries.
+			// A blind retry of the same request mostly returns the same answer, so each retry is
+			// told what was wrong.
 			let previous = (attempt > 1).then_some(last.as_str());
 			let translated = self.translate_markdown_chunk(markdown, guidance, target, previous)?;
 			let Some(why) = structure_mismatch(markdown, &translated) else {
@@ -349,10 +292,7 @@ impl ClaudeClient {
 			last = why;
 			last_text = translated;
 		}
-		// The counts alone say a section is short without saying which part of it went missing,
-		// which is not enough to tell a model that is dropping something from a check that is
-		// counting the wrong thing. The last attempt goes to the log so the next run can be read
-		// rather than guessed at.
+		// The counts don't say what went missing, so the log gets the last attempt.
 		eprintln!("--- what came back, last attempt:\n{last_text}\n--- what was sent:\n{markdown}\n---");
 		Err(format!(
 			"{} came back incomplete {MARKDOWN_ATTEMPTS} times in {}: {last}",
@@ -375,16 +315,8 @@ impl ClaudeClient {
 				 Return every heading and every list item this time, in the same order."
 			)
 		});
-		// Markdown comes back as text, not wrapped in JSON like the string batches are.
-		//
-		// It used to be a `json_schema` response with one string property, and German stopped
-		// dead in the middle of `Dialog \u{201e}Alle Dokumente`, at the exact point the closing
-		// quote belonged, on every attempt. A schema response is generated against a JSON
-		// grammar, so a quote character inside the string is the one thing the model cannot
-		// simply write, and a document full of typographic quotes has to thread that needle on
-		// every one. Asking for text asks for none of it. Retries, a heading cap, an explicit
-		// instruction and more effort all left it truncated in the same place, which is what a
-		// grammar does and not what a model that is merely being careless does.
+		// Text, not a `json_schema` response. A schema response is generated against a JSON
+		// grammar, which cut German off at a closing quote mark on every attempt.
 		let request = json!({
 			"model": self.model,
 			"max_tokens": MAX_TOKENS,
@@ -405,9 +337,11 @@ impl ClaudeClient {
 		Ok(unfenced(self.send(&request)?.trim()))
 	}
 
-	/// `now`, a readme section whose English changed from `was`, with the translation in `existing` kept for every line whose English did not change and only the rest translated. See [`crate::update`].
+	/// Updates the translation of a section whose English changed from `was` to `now`. See
+	/// [`crate::update`].
 	///
-	/// Falls back to [`Self::translate_markdown`] with the existing translation as guidance when the lines cannot be paired, or no answer fits after [`MARKDOWN_ATTEMPTS`], since a section reworded in places is better than one not updated at all.
+	/// Falls back to [`Self::translate_markdown`], because a section reworded in places is better
+	/// than one that isn't updated.
 	pub fn update_markdown(
 		&self,
 		was: &str,
@@ -478,7 +412,6 @@ impl ClaudeClient {
 		})
 	}
 
-	/// Posts `request` and returns the first text block, retrying the statuses that deserve it.
 	fn send(&self, request: &Value) -> Result<String, Box<dyn Error>> {
 		let mut attempt = 0;
 		loop {
@@ -493,8 +426,6 @@ impl ClaudeClient {
 				.send_json(request);
 			let mut response = match response {
 				Ok(response) => response,
-				// A transport-level failure (DNS, TLS, dropped connection) is as retryable as
-				// a 503 and arrives as a different kind of value, so it rejoins the same path.
 				Err(e) if attempt < MAX_ATTEMPTS => {
 					backoff(attempt, None);
 					let _ = e;
@@ -509,9 +440,6 @@ impl ClaudeClient {
 			if status.is_success() {
 				return first_text_block(&body);
 			}
-			// 429 and 5xx are transient. Everything else (401, 400, ...) will fail the same
-			// way however many times it is sent, so it surfaces immediately with the API's own
-			// error text, which says which field was wrong.
 			let retryable = status.as_u16() == 429 || status.is_server_error();
 			if retryable && attempt < MAX_ATTEMPTS {
 				backoff(attempt, retry_after);
@@ -523,21 +451,16 @@ impl ClaudeClient {
 }
 
 fn backoff(attempt: u32, retry_after: Option<u64>) {
-	// Honour the server's own retry-after when it sends one; it knows when the limit resets.
 	let seconds = retry_after.unwrap_or_else(|| 2u64.pow(attempt));
 	thread::sleep(Duration::from_secs(seconds.min(60)));
 }
 
-/// Pulls the response text out of a successful `/v1/messages` body.
-///
-/// `content` is a list of blocks and the text is not necessarily the first: with thinking on,
-/// a `thinking` block precedes it. Filtering by type rather than indexing avoids returning a
-/// reasoning summary as if it were the translation.
+// The text isn't always the first block: with thinking on, a `thinking` block comes before it.
 fn first_text_block(body: &str) -> Result<String, Box<dyn Error>> {
 	let parsed: Value =
 		serde_json::from_str(body).map_err(|e| format!("Claude response was not valid JSON: {e} (body: {body})"))?;
-	// A refusal is a 200 with no usable content, so it needs its own message rather than
-	// being reported as a malformed response.
+	// A refusal is a 200 with no usable content, which would otherwise read as a malformed
+	// response.
 	if parsed.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
 		return Err(
 			format!("Claude declined the request: {}", parsed.get("stop_details").unwrap_or(&Value::Null)).into()
@@ -557,20 +480,14 @@ fn first_text_block(body: &str) -> Result<String, Box<dyn Error>> {
 		.ok_or_else(|| format!("Claude response had no text block (body: {body})").into())
 }
 
-/// Whether `output_config.effort` is accepted by this model.
-///
-/// The Haiku tier does not take it and returns a 400 for the whole request, so this is a
-/// correctness check, not a tuning one. Written as "everything except Haiku" rather than a list
-/// of models that do support it, so a newer model set through `PATOIS_TRANSLATE_MODEL` gets
-/// the parameter by default instead of silently losing it.
+// The Haiku tier returns a 400 for `effort`. This is "everything except Haiku" rather than a list,
+// so that a newer model gets the parameter by default.
 fn supports_effort(model: &str) -> bool {
 	!model.contains("haiku")
 }
 
-/// `markdown` without the code fence a model sometimes wraps a whole answer in.
-///
-/// Only when the first line opens a fence and the last line closes one, so a section that really
-/// does begin with a fenced block keeps it.
+/// Removes the code fence that a model sometimes wraps a whole answer in. The first line must open
+/// a fence and the last must close one, so a section that begins with a fenced block keeps it.
 fn unfenced(markdown: &str) -> String {
 	let mut lines = markdown.lines();
 	let (Some(first), Some(last)) = (lines.next(), markdown.lines().next_back()) else {

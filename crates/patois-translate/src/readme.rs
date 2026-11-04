@@ -1,6 +1,7 @@
 use std::{
 	collections::{HashMap, hash_map::DefaultHasher},
 	error::Error,
+	fmt::Write as _,
 	fs,
 	hash::{Hash, Hasher},
 	path::Path,
@@ -22,23 +23,14 @@ use crate::{
 const MARKER_START: &str = "<!-- machine-translated from ";
 const HASH_TAG: &str = " (source-hash: ";
 const MARKER_SUFFIX: &str = "); please review and edit as needed -->";
-/// Separates the whole-document hash from the per-section ones inside the marker.
 const SECTIONS_TAG: &str = "; sections: ";
-/// How far back through the readme's history [`previous_source`] looks for the English a translation was made from. A translation older than this is updated with the existing text as guidance instead.
 const HISTORY_LIMIT: usize = 200;
 
-/// Machine-translates the project's readme, such as `doc/readme.md`, into `doc/readme-<lang>.md`
-/// for every language in `langs`. Every language goes through the same pipeline, including ones that already have
-/// a translated file, machine-generated or not, since there's no reliable way to tell how
-/// stale a hand-written one has become. It is gated only on whether the English source has
-/// changed since the last time that language's file was (re)written (see
-/// [`needs_translation`]).
+/// Translates the readme into `<stem>-<lang>.md` for each language in `langs`.
 ///
-/// Only the sections that changed are sent to the model. The rest are carried over from the
-/// existing translation untouched, so a one-line edit costs one request and leaves the other
-/// sections byte-identical instead of rewriting the whole document in fresh wording. Where the
-/// sections cannot be lined up, the whole document is translated as before: see
-/// [`reusable_sections`].
+/// Only the sections that changed go to the model, so a one-line edit costs one request and leaves
+/// the other sections as they were. A file written by hand goes through the same steps, because
+/// nothing can tell how stale it has become.
 pub fn sync_readmes(
 	project: &Project,
 	langs: &[String],
@@ -59,7 +51,6 @@ pub fn sync_readmes(
 	let sections = split_sections(&source_md);
 	let hashes: Vec<String> = sections.iter().map(|section| section_hash(section)).collect();
 	let mut failed: Vec<String> = Vec::new();
-	// Most languages were last translated from the same English, so each version is looked up once.
 	let mut previous: HashMap<String, Option<Vec<String>>> = HashMap::new();
 	for lang in langs {
 		let target_path = doc_dir.join(format!("{stem}-{lang}.md"));
@@ -95,9 +86,8 @@ pub fn sync_readmes(
 		let catalog =
 			fs::read_to_string(project.root.join(project.po_dir).join(format!("{lang}.po"))).unwrap_or_default();
 		let terms = Terms::from_catalog(&catalog);
-		// One language failing its checks does not stop the others: it is recorded and reported
-		// at the end. A nightly run that gives up on the first bad language would leave
-		// every language after it in the list stale for as long as that one kept failing.
+		// A run that gives up on the first bad language would leave every later language stale for
+		// as long as that one kept failing.
 		match translate_document(client, &sections, reusable, was.as_deref(), &terms, &target) {
 			Ok(translated_md) => {
 				fs::write(
@@ -118,7 +108,6 @@ pub fn sync_readmes(
 	Ok(())
 }
 
-/// The translated readme, section by section, carrying over the sections `reusable` already has and updating the ones whose English changed, line by line where `was`, the English the existing translation was made from, has the section's previous version.
 fn translate_document(
 	client: &ClaudeClient,
 	sections: &[String],
@@ -128,7 +117,8 @@ fn translate_document(
 	target: &Target,
 ) -> Result<String, Box<dyn Error>> {
 	let mut out: Vec<String> = Vec::with_capacity(sections.len());
-	// Still section by section with nothing to carry over, rather than the whole document in one request. The text comes out the same, but a section that comes back short is caught against the section it came from instead of disappearing into a response that covered half the readme.
+	// Section by section even with nothing to carry over, so that a section that comes back short
+	// is caught against its source.
 	let reusable = reusable
 		.map_or_else(|| sections.iter().map(|_| None).collect(), |r| r.into_iter().map(Some).collect::<Vec<_>>());
 	for (section, existing) in sections.iter().zip(reusable) {
@@ -138,7 +128,7 @@ fn translate_document(
 			Some(Existing::Outdated { translation, was_hash }) => {
 				match was.and_then(|was| was.iter().find(|old| section_hash(old) == was_hash)) {
 					Some(old) => {
-						out.push(client.update_markdown(old, section, &translation, &section_terms, target)?)
+						out.push(client.update_markdown(old, section, &translation, &section_terms, target)?);
 					}
 					None => out.push(client.translate_markdown(
 						section,
@@ -157,7 +147,6 @@ fn translate_document(
 	Ok(out.join("\n\n"))
 }
 
-/// What a dry run says about how the changed sections would be updated: how many lines would be sent where the lines pair up, and which sections would be retranslated with the existing text as guidance instead.
 fn update_summary(sections: &[String], reusable: &[Existing], was: Option<&[String]>) -> String {
 	let mut lines = 0;
 	let mut whole: Vec<String> = Vec::new();
@@ -171,37 +160,19 @@ fn update_summary(sections: &[String], reusable: &[Existing], was: Option<&[Stri
 	}
 	let mut summary = format!(" ({lines} changed {}", if lines == 1 { "line" } else { "lines" });
 	if !whole.is_empty() {
-		summary.push_str(&format!("; whole, with the existing text as guidance: {}", whole.join(", ")));
+		let _ = write!(summary, "; whole, with the existing text as guidance: {}", whole.join(", "));
 	}
 	summary.push(')');
 	summary
 }
 
-/// Whether `doc/readme-<lang>.md` needs (re)translating: yes if it doesn't exist yet, or
-/// exists without a marker comment (pre-dates this pipeline), or its marker's source hash
-/// doesn't match the current English source. No only when a marker is present and its
-/// hash matches, meaning this exact English source was already translated into this file.
 fn needs_translation(existing_content: Option<&str>, current_source_hash: &str) -> bool {
 	existing_content.and_then(existing_marker_hash).is_none_or(|existing_hash| existing_hash != current_source_hash)
 }
 
-/// The existing translation of each source section, where it can be carried over unchanged.
-///
-/// `Some(v)` with `v[i]` holding the translated text of source section `i` when that section's
-/// English text is unchanged, and `None` in that slot when it has to be translated again.
-///
-/// `None` for the whole thing when the sections cannot be lined up with confidence: the file
-/// carries no per-section hashes (written before this existed, or by hand), or the number of
-/// sections in the source, in the marker, or in the translation disagree. A section added or
-/// removed shifts every section after it, and a hand-edited file may not be split the same way
-/// at all, so pairing by position would carry the wrong text across. Translating the whole
-/// document is slower but cannot silently reattach a heading to the wrong body.
-/// A section of an existing translation, paired with the English section it translates.
 #[derive(Debug, PartialEq, Eq)]
 enum Existing {
-	/// Its English is unchanged, so it carries over as it is.
 	Kept(String),
-	/// Its English changed, from the section whose hash is `was_hash`. It is what gets updated, so the lines that did not change keep their wording.
 	Outdated { translation: String, was_hash: String },
 }
 
@@ -214,6 +185,11 @@ impl Existing {
 	}
 }
 
+/// Returns the existing translation of each source section, or `None` if the sections can't be
+/// lined up: the file has no section hashes, or the counts of sections disagree.
+///
+/// A section added or removed shifts every later section, so pairing by position could attach a
+/// heading to the wrong body. Translating the whole document is slower but can't do that.
 fn reusable_sections(existing_content: &str, source_hashes: &[String]) -> Option<Vec<Existing>> {
 	let stored = existing_marker_section_hashes(existing_content)?;
 	if stored.len() != source_hashes.len() {
@@ -240,7 +216,9 @@ fn reusable_sections(existing_content: &str, source_hashes: &[String]) -> Option
 	)
 }
 
-/// The English `readme` was when its hash was `hash`, from the repository's history: what an existing translation was made from, so [`crate::update`] can tell which of its lines changed. `None` outside a git repository, in a shallow clone without that commit, or when no version within [`HISTORY_LIMIT`] matches.
+/// Finds the English that a translation was made from in the git history, so that [`crate::update`]
+/// can tell which lines changed. Returns `None` outside a repository, in a shallow clone, or if no
+/// version within [`HISTORY_LIMIT`] matches.
 fn previous_source(root: &Path, readme: &Path, hash: &str) -> Option<String> {
 	let path = readme.to_string_lossy().replace('\\', "/");
 	let log = Command::new("git").current_dir(root).args(["log", "--format=%H", "--", &path]).output().ok()?;
@@ -250,9 +228,10 @@ fn previous_source(root: &Path, readme: &Path, hash: &str) -> Option<String> {
 	String::from_utf8_lossy(&log.stdout).lines().take(HISTORY_LIMIT).find_map(|commit| {
 		let shown = Command::new("git").current_dir(root).args(["show", &format!("{commit}:{path}")]).output().ok()?;
 		let text = String::from_utf8(shown.stdout).ok().filter(|_| shown.status.success())?;
-		// The hash was taken from the file as checked out, which on Windows may have CRLF endings where the commit has LF.
+		// The hash came from the checked-out file, which on Windows can have CRLF where the commit
+		// has LF.
 		let crlf = text.replace("\r\n", "\n").replace('\n', "\r\n");
-		[text.clone(), crlf].into_iter().find(|candidate| source_hash(candidate) == hash)
+		[text, crlf].into_iter().find(|candidate| source_hash(candidate) == hash)
 	})
 }
 
@@ -262,9 +241,8 @@ fn source_hash(source_md: &str) -> String {
 	format!("{:016x}", hasher.finish())
 }
 
-/// Shorter than the document hash: one of these is written per section, and the marker stays a
-/// single line. Half the bits is ample for telling a couple of dozen sections apart, and a
-/// collision costs a section that was not re-translated, not a wrong one.
+// Shorter than the document hash, so that the marker stays on one line. A collision costs a section
+// that isn't translated again, not a wrong one.
 fn section_hash(section: &str) -> String {
 	let mut hasher = DefaultHasher::new();
 	section.hash(&mut hasher);
@@ -275,8 +253,6 @@ fn marker_line(source: &str, hash: &str, section_hashes: &[String]) -> String {
 	format!("{MARKER_START}{source}{HASH_TAG}{hash}{SECTIONS_TAG}{}{MARKER_SUFFIX}", section_hashes.join(","))
 }
 
-/// What's between the source-hash tag and the end of the marker on the first line, whatever the
-/// source file is called, so files marked by an earlier version still match.
 fn marker_body(content: &str) -> Option<&str> {
 	let line = content.lines().next()?.trim().strip_prefix(MARKER_START)?.strip_suffix(MARKER_SUFFIX)?;
 	line.split_once(HASH_TAG).map(|(_, body)| body)
@@ -338,7 +314,6 @@ mod tests {
 		assert_eq!(existing_marker_section_hashes(&content), Some(vec!["aaaaaaaa", "bbbbbbbb"]));
 	}
 
-	/// The point of the whole thing: an edit to one section leaves the others alone.
 	#[test]
 	fn only_the_changed_section_is_marked_for_translation() {
 		let old_hashes = ["11111111".to_string(), "22222222".to_string(), "33333333".to_string()];
@@ -353,9 +328,6 @@ mod tests {
 		assert!(reusable[2].kept().is_some(), "unchanged last section should carry over");
 	}
 
-	/// The same journey a real file makes: translated once, the English edited in one place,
-	/// then asked what needs doing. Uses the real hashes rather than stand-ins, so a change to
-	/// how sections are cut or hashed shows up here.
 	#[test]
 	fn a_real_edit_reuses_every_untouched_section() {
 		let before = "# Title
@@ -371,7 +343,6 @@ One.
 Old entry.";
 		let hashes: Vec<String> = split_sections(before).iter().map(|s| section_hash(s)).collect();
 		assert_eq!(hashes.len(), 3, "title, features, changelog");
-		// What the pipeline would have written after translating it.
 		let translated = format!(
 			"{}
 
@@ -388,7 +359,6 @@ Une.
 Ancienne entree.",
 			marker_line("doc/readme.md", &source_hash(before), &hashes)
 		);
-		// One line added to the changelog, which is the common case.
 		let after = "# Title
 
 Intro.
@@ -410,8 +380,6 @@ Old entry.";
 		assert!(reusable[1].kept().unwrap().contains("Fonctions"), "features carries over as translated");
 	}
 
-	/// A file written before per-section hashes existed, or edited by hand into a different
-	/// shape, cannot be paired up; translating it whole is the safe answer.
 	#[test]
 	fn a_file_without_section_hashes_cannot_be_reused() {
 		let content = format!("{MARKER_START}doc/readme.md{HASH_TAG}abc{MARKER_SUFFIX}\n\nIntro\n\n## One\n\nFirst");
@@ -428,8 +396,6 @@ Old entry.";
 		assert_eq!(reusable_sections(&content, &now), None);
 	}
 
-	/// The marker says two sections but the body holds three, so the file was edited under the
-	/// pipeline's feet and positions can no longer be trusted.
 	#[test]
 	fn a_translation_that_does_not_match_its_own_marker_cannot_be_reused() {
 		let content = format!(
