@@ -29,7 +29,7 @@ pub mod ui;
 use std::path::Path;
 
 pub use inventory;
-pub use lang::{LanguageInfo, LanguageManager, language_name};
+pub use lang::{LanguageInfo, LanguageManager, best_available_language, language_name};
 pub use patois_macros::embed_domain;
 #[cfg(feature = "ui")]
 pub use patois_macros::embed_wx_translations;
@@ -145,7 +145,7 @@ pub fn system_locale() -> String {
 
 /// Initialise patois for an app that embeds its translations via [`embed_domain!`].
 ///
-/// Sets `domain` as the default domain and activates the system locale automatically.
+/// Sets `domain` as the default domain and activates the catalog that best fits the system language.
 /// This is the minimal startup call for most desktop apps:
 /// ```rust,no_run
 /// patois::embed_domain!();
@@ -154,7 +154,8 @@ pub fn system_locale() -> String {
 /// }
 /// ```
 pub fn init_auto(domain: &str) {
-	let locale = system_locale();
+	let languages = LanguageManager::new(domain).available();
+	let locale = best_available_language(&system_locale(), &languages).unwrap_or_else(|| "en".to_string());
 	let mut reg = registry::global().lock().unwrap();
 	reg.set_default_domain(domain);
 	reg.set_locale(&locale);

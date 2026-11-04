@@ -148,8 +148,10 @@ pub(crate) fn normalize_locale(locale: &str) -> String {
 
 fn locale_chain(locale: &str) -> Vec<String> {
 	let mut chain = vec![locale.to_string()];
-	if let Some((lang, _)) = locale.split_once('_') {
-		chain.push(lang.to_string());
+	let mut rest = locale;
+	while let Some((shorter, _)) = rest.rsplit_once('_') {
+		chain.push(shorter.to_string());
+		rest = shorter;
 	}
 	chain
 }
@@ -170,6 +172,7 @@ mod tests {
 		assert_eq!(normalize_locale("en-US"), "en_US");
 		assert_eq!(normalize_locale("DE_de"), "de_DE");
 		assert_eq!(normalize_locale("fr"), "fr");
+		assert_eq!(normalize_locale("zh-Hans-CN"), "zh_HANS_CN");
 	}
 
 	#[test]
@@ -188,6 +191,7 @@ mod tests {
 	fn locale_chain_expands_region() {
 		assert_eq!(locale_chain("de_DE"), vec!["de_DE", "de"]);
 		assert_eq!(locale_chain("fr"), vec!["fr"]);
+		assert_eq!(locale_chain("zh_HANS_CN"), vec!["zh_HANS_CN", "zh_HANS", "zh"]);
 	}
 
 	#[test]

@@ -74,6 +74,42 @@ impl LanguageManager {
 	}
 }
 
+/// Returns the code of the language in `available` that best fits `system_code`, or `None` if no
+/// language fits.
+///
+/// A system locale often names more or less than a catalog does. The function tries these matches
+/// in order, ignoring case and the separator:
+///
+/// 1. The same locale.
+/// 2. The most specific catalog whose parts all appear in the system locale, so `de_DE` finds `de`,
+///    and `zh-Hans-CN` finds `zh_CN`.
+/// 3. Any catalog for the language, so a reader in Taiwan gets Simplified Chinese instead of
+///    English.
+#[must_use]
+pub fn best_available_language(system_code: &str, available: &[LanguageInfo]) -> Option<String> {
+	let wanted = normalize_locale(system_code);
+	let wanted_parts: Vec<&str> = wanted.split('_').collect();
+	let catalogs: Vec<(&LanguageInfo, String)> = available.iter().map(|l| (l, normalize_locale(&l.code))).collect();
+	let same_language: Vec<(&LanguageInfo, Vec<&str>)> = catalogs
+		.iter()
+		.map(|(l, code)| (*l, code.split('_').collect::<Vec<_>>()))
+		.filter(|(_, parts)| parts[0] == wanted_parts[0])
+		.collect();
+	catalogs
+		.iter()
+		.find(|(_, code)| *code == wanted)
+		.map(|(l, _)| *l)
+		.or_else(|| {
+			same_language
+				.iter()
+				.filter(|(_, parts)| parts.iter().all(|part| wanted_parts.contains(part)))
+				.max_by_key(|(_, parts)| parts.len())
+				.map(|(l, _)| *l)
+		})
+		.or_else(|| same_language.first().map(|(l, _)| *l))
+		.map(|l| l.code.clone())
+}
+
 /// Returns the native display name for a locale code, or the code itself if not recognised.
 ///
 /// Matching is done on the raw code as stored in your `locale/` directory.
@@ -154,5 +190,53 @@ mod tests {
 	fn language_name_unknown_returns_code() {
 		assert_eq!(language_name("xx"), "xx");
 		assert_eq!(language_name("tok"), "tok");
+	}
+
+	fn available(codes: &[&str]) -> Vec<LanguageInfo> {
+		codes.iter().map(|c| LanguageInfo { code: (*c).to_string(), name: (*c).to_string() }).collect()
+	}
+
+	#[test]
+	fn an_exact_code_wins() {
+		let langs = available(&["en", "de", "zh_CN"]);
+		assert_eq!(best_available_language("zh_CN", &langs).as_deref(), Some("zh_CN"));
+	}
+
+	#[test]
+	fn the_same_code_in_another_case_still_matches() {
+		let langs = available(&["en", "pt_br"]);
+		assert_eq!(best_available_language("pt_BR", &langs).as_deref(), Some("pt_br"));
+		assert_eq!(best_available_language("pt-BR", &langs).as_deref(), Some("pt_br"));
+	}
+
+	#[test]
+	fn a_region_the_catalogs_do_not_have_falls_back_to_the_language() {
+		let langs = available(&["en", "de"]);
+		assert_eq!(best_available_language("de_DE", &langs).as_deref(), Some("de"));
+	}
+
+	#[test]
+	fn a_script_in_the_system_locale_does_not_hide_the_matching_catalog() {
+		let langs = available(&["en", "zh_TW", "zh_CN"]);
+		assert_eq!(best_available_language("zh-Hans-CN", &langs).as_deref(), Some("zh_CN"));
+		assert_eq!(best_available_language("zh-Hant-TW", &langs).as_deref(), Some("zh_TW"));
+	}
+
+	#[test]
+	fn the_most_specific_matching_catalog_wins() {
+		let langs = available(&["zh", "zh_CN"]);
+		assert_eq!(best_available_language("zh-Hans-CN", &langs).as_deref(), Some("zh_CN"));
+	}
+
+	#[test]
+	fn another_region_of_the_same_language_is_better_than_english() {
+		let langs = available(&["en", "zh_CN"]);
+		assert_eq!(best_available_language("zh_TW", &langs).as_deref(), Some("zh_CN"));
+	}
+
+	#[test]
+	fn a_language_with_no_catalog_matches_nothing() {
+		let langs = available(&["en", "de"]);
+		assert_eq!(best_available_language("ja_JP", &langs), None);
 	}
 }
