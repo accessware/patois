@@ -8,6 +8,7 @@ readme.workspace = true
 repository.workspace = true
 keywords = ["i18n", "l10n", "gettext", "build", "translation"]
 categories = ["internationalization", "localization", "development-tools::build-utils"]
+rust-version = "1.95.0"
 
 [dependencies]
 serde_json = "1.0.154"

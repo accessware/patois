@@ -8,6 +8,7 @@ readme.workspace = true
 repository.workspace = true
 keywords = ["i18n", "l10n", "gettext", "translation", "wxdragon"]
 categories = ["internationalization", "localization", "gui"]
+rust-version = "1.88.0"
 
 [package.metadata.docs.rs]
 features = ["wx"]

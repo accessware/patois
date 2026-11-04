@@ -8,6 +8,7 @@ readme.workspace = true
 repository.workspace = true
 keywords = ["i18n", "l10n", "gettext", "translation", "claude"]
 categories = ["internationalization", "localization", "development-tools"]
+rust-version = "1.95.0"
 
 [dependencies]
 patois = { version = "0.3.0", path = "../patois" }

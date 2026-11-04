@@ -26,6 +26,8 @@ Libraries can mark their strings too. A library calls `t()` and needs no setup o
 
 ## Before you begin
 
+An app needs Rust 1.95 or later, because `patois-build` does. A library that depends only on `patois` needs Rust 1.88 or later.
+
 Install the [gettext tools](https://www.gnu.org/software/gettext/) and make sure that they're on your `PATH`. To install them, use one of the following commands:
 
 - Windows: `scoop install gettext`
