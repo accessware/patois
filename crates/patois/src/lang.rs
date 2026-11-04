@@ -1,28 +1,33 @@
 use crate::{available_locales, locale, registry::normalize_locale, set_locale};
 
-/// A language available for the app, with its code and native display name.
+/// A language that an app offers.
 #[derive(Debug, Clone)]
 pub struct LanguageInfo {
-	/// BCP 47 / gettext locale code as stored in the `locale/` directory (e.g. `"de"`, `"pt_br"`).
+	/// The name of the catalog's directory under `locale/`, such as `de` or `pt_br`.
 	pub code: String,
-	/// Native name suitable for display in a language-selector UI (e.g. `"Deutsch"`).
+	/// The language's name in that language, for a language selector, such as `Deutsch`.
 	pub name: String,
 }
 
-/// Manages runtime language selection for a patois domain.
+/// Lists the languages of a domain and switches between them.
 ///
-/// # Example
+/// Sees embedded catalogs only, because those are the only ones known without scanning a directory
+/// that the app chose.
+///
+/// # Examples
 ///
 /// ```rust,no_run
 /// patois::embed_domain!();
 ///
 /// fn main() {
 ///     patois::init_auto(env!("CARGO_PKG_NAME"));
-///     let mgr = patois::LanguageManager::new(env!("CARGO_PKG_NAME"));
-///     for lang in mgr.available() {
-///         println!("{}: {}", lang.code, lang.name);
+///     let languages = patois::LanguageManager::new(env!("CARGO_PKG_NAME"));
+///     for language in languages.available() {
+///         println!("{}: {}", language.code, language.name);
 ///     }
-///     mgr.set("de");
+///     if !languages.set("de") {
+///         eprintln!("This app has no German catalog.");
+///     }
 /// }
 /// ```
 pub struct LanguageManager {
@@ -30,12 +35,14 @@ pub struct LanguageManager {
 }
 
 impl LanguageManager {
-	/// Create a manager for the given patois domain.
+	/// Creates a manager for `domain`.
+	#[must_use]
 	pub fn new(domain: &str) -> Self {
 		Self { domain: domain.to_string() }
 	}
 
-	/// All available languages: English is always first, the rest are sorted by native name.
+	/// Returns the available languages: English first, then the others sorted by native name.
+	#[must_use]
 	pub fn available(&self) -> Vec<LanguageInfo> {
 		let mut langs = vec![LanguageInfo { code: "en".to_string(), name: "English".to_string() }];
 		let mut others: Vec<LanguageInfo> = available_locales(&self.domain)
@@ -48,7 +55,13 @@ impl LanguageManager {
 		langs
 	}
 
-	/// Returns the currently active locale code.
+	/// Returns the active locale, spelled like the [`LanguageInfo::code`] of its catalog when
+	/// there is one, so that the result can be compared with [`Self::available`].
+	///
+	/// # Panics
+	///
+	/// Panics if a thread panicked while it held the lock on the global translation state.
+	#[must_use]
 	pub fn current(&self) -> String {
 		let active = locale();
 		available_locales(&self.domain)
@@ -57,7 +70,14 @@ impl LanguageManager {
 			.map_or(active, str::to_string)
 	}
 
-	/// Switch to `code`. Returns `false` if the code is not in the available list (English always accepted).
+	/// Switches to the language `code`, and returns whether the language is available.
+	///
+	/// English is always available. Case and the separator in `code` don't matter.
+	///
+	/// # Panics
+	///
+	/// Panics if a thread panicked while it held the lock on the global translation state.
+	#[must_use]
 	pub fn set(&self, code: &str) -> bool {
 		let wanted = normalize_locale(code);
 		if wanted == "en" || available_locales(&self.domain).iter().any(|c| normalize_locale(c) == wanted) {
@@ -68,7 +88,8 @@ impl LanguageManager {
 		}
 	}
 
-	/// Detect the operating system's preferred locale, falling back to `"en"`.
+	/// Returns the preferred locale of the operating system, or `en` if it can't be determined.
+	#[must_use]
 	pub fn system_language() -> String {
 		crate::system_locale()
 	}
@@ -110,9 +131,10 @@ pub fn best_available_language(system_code: &str, available: &[LanguageInfo]) ->
 		.map(|l| l.code.clone())
 }
 
-/// Returns the native display name for a locale code, or the code itself if not recognised.
+/// Returns the name of the language `code` in that language, or `code` if the language is unknown.
 ///
-/// Matching is done on the raw code as stored in your `locale/` directory.
+/// Case doesn't matter, but the separator must be an underscore.
+#[must_use]
 pub fn language_name(code: &str) -> &str {
 	match code.to_lowercase().as_str() {
 		"af" => "Afrikaans",

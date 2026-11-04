@@ -9,54 +9,30 @@ use crate::plural::PluralRule;
 const MAGIC_LE: u32 = 0x9504_12DE;
 const MAGIC_BE: u32 = 0xDE12_0495;
 
-/// A parsed gettext .mo catalog.
-pub(crate) struct Catalog {
+pub struct Catalog {
 	translations: HashMap<String, Vec<String>>,
 	plural_rule: Option<PluralRule>,
 }
 
 impl Catalog {
-	/// Parse a .mo file from any `Read` source.
 	pub fn parse(mut reader: impl Read) -> io::Result<Self> {
 		let mut data = Vec::new();
 		reader.read_to_end(&mut data)?;
 		parse_mo(&data).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid .mo file"))
 	}
 
-	/// Look up a singular translation, returning `key` unchanged if not found.
 	pub fn gettext<'a>(&'a self, key: &'a str) -> &'a str {
-		self.translations.get(key).and_then(|forms| forms.first()).map(String::as_str).unwrap_or(key)
+		self.translations.get(key).and_then(|forms| forms.first()).map_or(key, String::as_str)
 	}
 
-	/// Look up a plural translation.
-	///
-	/// Uses the catalog's own `Plural-Forms` rule (parsed from the .mo header) when present, so
-	/// languages with more than two forms (e.g. Slavic, Arabic) select the right one. Falls back
-	/// to a simplified English-style rule (n == 1 form 0, else form 1) when the header has no
-	/// rule or it fails to parse.
 	pub fn ngettext<'a>(&'a self, singular: &'a str, plural: &'a str, n: u64) -> &'a str {
-		match self.translations.get(singular) {
-			Some(forms) => {
-				let idx = match &self.plural_rule {
-					Some(rule) => rule.index_for(n).min(forms.len().saturating_sub(1)),
-					None => {
-						if n == 1 {
-							0
-						} else {
-							forms.len().saturating_sub(1).min(1)
-						}
-					}
-				};
-				forms.get(idx).map(String::as_str).unwrap_or(if n == 1 { singular } else { plural })
-			}
-			None => {
-				if n == 1 {
-					singular
-				} else {
-					plural
-				}
-			}
-		}
+		let english = if n == 1 { singular } else { plural };
+		let Some(forms) = self.translations.get(singular) else {
+			return english;
+		};
+		let last = forms.len().saturating_sub(1);
+		let index = self.plural_rule.as_ref().map_or_else(|| usize::from(n != 1), |rule| rule.index_for(n));
+		forms.get(index.min(last)).map_or(english, String::as_str)
 	}
 }
 
@@ -88,12 +64,9 @@ fn parse_mo(data: &[u8]) -> Option<Catalog> {
 		let val_bytes = data.get(trans_off..trans_off + trans_len)?;
 		let key = str::from_utf8(key_bytes).ok()?;
 		let val = str::from_utf8(val_bytes).ok()?;
-		// Plural forms: key is "singular\0plural", val is "form0\0form1\0..." We key the map on the singular msgid.
+		// A plural entry's key is "singular\0plural" and its value is "form0\0form1\0...".
 		let singular = key.split('\0').next()?;
 		if singular.is_empty() {
-			// The header entry: its "translation" is a block of "Key: value\n" metadata lines,
-			// not a real msgstr, so it never goes into `translations`. Pull the Plural-Forms
-			// rule out of it instead of discarding it outright.
 			plural_rule = PluralRule::parse_from_header(val);
 			continue;
 		}
@@ -114,9 +87,8 @@ pub mod tests {
 
 	use super::*;
 
+	#[allow(clippy::cast_possible_truncation, reason = "test catalogs are far smaller than 4 GiB")]
 	pub fn make_mo(entries: &[(&str, &str)]) -> Vec<u8> {
-		// Build a minimal little-endian .mo file in memory.
-		// Header: magic, revision, N, orig_offset, trans_offset, hash_size, hash_offset.
 		let n = entries.len();
 		let orig_table_off: u32 = 28;
 		let trans_table_off: u32 = orig_table_off + (n as u32) * 8;
@@ -126,7 +98,6 @@ pub mod tests {
 		let mut orig_table: Vec<u8> = Vec::new();
 		let mut trans_table: Vec<u8> = Vec::new();
 		let mut cur_orig = strings_off;
-		let _cur_trans = strings_off;
 		for (key, _) in entries {
 			orig_table.extend_from_slice(&(key.len() as u32).to_le_bytes());
 			orig_table.extend_from_slice(&cur_orig.to_le_bytes());
@@ -145,12 +116,15 @@ pub mod tests {
 		}
 		let mut mo: Vec<u8> = Vec::new();
 		mo.extend_from_slice(&MAGIC_LE.to_le_bytes());
-		mo.extend_from_slice(&0u32.to_le_bytes()); // revision
+		let revision = 0u32;
+		let hash_size = 0u32;
+		let hash_offset = 0u32;
+		mo.extend_from_slice(&revision.to_le_bytes());
 		mo.extend_from_slice(&(n as u32).to_le_bytes());
 		mo.extend_from_slice(&orig_table_off.to_le_bytes());
 		mo.extend_from_slice(&trans_table_off.to_le_bytes());
-		mo.extend_from_slice(&0u32.to_le_bytes()); // hash size
-		mo.extend_from_slice(&0u32.to_le_bytes()); // hash offset
+		mo.extend_from_slice(&hash_size.to_le_bytes());
+		mo.extend_from_slice(&hash_offset.to_le_bytes());
 		mo.extend_from_slice(&orig_table);
 		mo.extend_from_slice(&trans_table);
 		mo.extend_from_slice(&orig_strings);

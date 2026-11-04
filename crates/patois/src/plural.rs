@@ -1,11 +1,3 @@
-//! Parses and evaluates gettext `Plural-Forms` header expressions.
-//!
-//! A `.mo` catalog's header entry (empty msgid) carries a line like:
-//! `Plural-Forms: nplurals=3; plural=(n%10==1 && n%100!=11) ? 0 : ((n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20)) ? 1 : 2);`
-//! The `plural` part is a small C conditional-expression language with one free variable, `n`.
-//! This module tokenizes and parses that expression once per catalog (at load time), then
-//! evaluates it cheaply for each `ngettext` call.
-
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
 	Num(i64),
@@ -115,10 +107,10 @@ enum BinOp {
 enum Expr {
 	N,
 	Num(i64),
-	Not(Box<Expr>),
-	Neg(Box<Expr>),
-	Bin(BinOp, Box<Expr>, Box<Expr>),
-	Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
+	Not(Box<Self>),
+	Neg(Box<Self>),
+	Bin(BinOp, Box<Self>, Box<Self>),
+	Ternary(Box<Self>, Box<Self>, Box<Self>),
 }
 
 struct Parser<'a> {
@@ -126,7 +118,7 @@ struct Parser<'a> {
 	pos: usize,
 }
 
-impl<'a> Parser<'a> {
+impl Parser<'_> {
 	fn peek(&self) -> Option<&Token> {
 		self.toks.get(self.pos)
 	}
@@ -319,17 +311,12 @@ fn eval(expr: &Expr, n: i64) -> i64 {
 	}
 }
 
-/// A parsed `Plural-Forms` rule: the number of plural forms the language has, and the
-/// expression that picks a form index (0-based) for a given count.
-pub(crate) struct PluralRule {
+pub struct PluralRule {
 	nplurals: usize,
 	expr: Expr,
 }
 
 impl PluralRule {
-	/// Parses a `.mo` header's `Plural-Forms: nplurals=N; plural=EXPR;` line, if present.
-	/// Returns `None` if the header lacks the line or the expression fails to parse, so callers
-	/// can fall back to a simplified rule.
 	pub(crate) fn parse_from_header(header: &str) -> Option<Self> {
 		let line = header.lines().find(|l| l.trim_start().starts_with("Plural-Forms:"))?;
 		let rest = line.trim_start().strip_prefix("Plural-Forms:")?;
@@ -345,7 +332,6 @@ impl PluralRule {
 		Some(Self { nplurals, expr })
 	}
 
-	/// Evaluates the rule for count `n`, returning a form index clamped to `[0, nplurals)`.
 	pub(crate) fn index_for(&self, n: u64) -> usize {
 		let n = i64::try_from(n).unwrap_or(i64::MAX);
 		let idx = eval(&self.expr, n);
