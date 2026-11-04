@@ -1,3 +1,8 @@
+//! Procedural macros for [patois](https://docs.rs/patois).
+//!
+//! Depend on `patois` and use these macros through its re-exports, because their output refers to
+//! items in `patois`.
+
 use std::{
 	collections::HashSet,
 	env, fs,
@@ -8,14 +13,19 @@ use proc_macro::TokenStream;
 use proc_macro2::{Literal, TokenStream as TokenStream2};
 use quote::quote;
 
-/// Embed the calling crate's locale files into the binary at compile time.
+/// Embeds the compiled catalogs of the calling crate in the binary.
 ///
-/// Scans `<crate_root>/locale/<lang>/LC_MESSAGES/<crate_name>.mo` for every compiled `.mo` file and registers them with the patois global registry via the `inventory` crate. Call once at module level in a library crate.
+/// Reads every `<crate_root>/locale/<lang>/LC_MESSAGES/<crate_name>.mo` file at compile time. Use
+/// the macro once, at module level, in the app crate. Generate the files in a build script with
+/// `patois_build::compile_translations`, so that they exist when the macro runs.
 ///
-/// Each catalog is stored deflated and inflated only when its locale is first asked for, so a binary carrying a dozen languages pays for one at a time in memory and about a third of their size on disk.
+/// The catalogs are stored deflated, and each one is inflated only when its locale is first used,
+/// so a binary with many languages holds one of them in memory at a time.
 ///
-/// The locale directory and `.mo` files must exist at compile time. Typically
-/// this means generating them in a `build.rs` that emits `cargo:rerun-if-changed=locale`.
+/// # Panics
+///
+/// Stops compilation with an error if a catalog can't be read, or if Cargo didn't set
+/// `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`.
 #[proc_macro]
 pub fn embed_domain(_input: TokenStream) -> TokenStream {
 	let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set during macro expansion");
@@ -26,7 +36,7 @@ pub fn embed_domain(_input: TokenStream) -> TokenStream {
 		&& let Ok(entries) = fs::read_dir(&locale_dir)
 	{
 		let mut locales: Vec<_> = entries.flatten().collect();
-		locales.sort_by_key(|e| e.file_name());
+		locales.sort_by_key(std::fs::DirEntry::file_name);
 		for entry in locales {
 			let locale_name = entry.file_name().to_string_lossy().to_string();
 			let mo_path = entry.path().join("LC_MESSAGES").join(format!("{pkg_name}.mo"));
@@ -47,48 +57,42 @@ pub fn embed_domain(_input: TokenStream) -> TokenStream {
 	.into()
 }
 
-/// Embed wxWidgets' own standard message catalogs (`wxstd`) for whichever languages this
-/// crate already ships — i.e. present under `<crate_root>/locale/`, the same directory
-/// [`embed_domain!`] reads. Call once at module level in an app crate that depends on
-/// `patois` with the `wx` feature and on `wxdragon` directly.
+/// Embeds the `wxstd` catalogs of wxWidgets for the languages that the calling crate ships, and
+/// generates a `WxStdCatalogLoader` type that serves them.
 ///
-/// wxWidgets ships translations for its own built-in UI strings ("OK", "Cancel",
-/// progress-dialog labels, etc.) as gettext `.mo` files, produced by the `wxdragon-sys`
-/// build into `<target>/<profile>/wxdragon_sys_cmake_build/share/locale/`. There's no such
-/// tree next to an installed app, so this bundles the catalogs at compile time (mirroring
-/// how [`embed_domain!`] bundles the app's own translations) and expands to a
-/// `WxStdCatalogLoader` type implementing `wxdragon::translations::TranslationsLoader` that
-/// serves the embedded bytes on demand.
+/// wxWidgets has its own translations for stock strings, such as the labels on standard buttons.
+/// The `wxdragon-sys` build puts them under `target/<profile>`, which doesn't exist next to an
+/// installed app, so this macro copies them into the binary. It embeds only the languages under
+/// `<crate_root>/locale/`, so the binary doesn't carry languages that the app doesn't have.
 ///
-/// Only languages the app itself ships are embedded, so the two translation sets stay in
-/// lockstep and the binary isn't bloated with wx catalogs for languages the app isn't
-/// translated into. Degrades gracefully to an empty catalog set (no panic) if the wx locale
-/// directory doesn't exist yet, e.g. building in CI without gettext (`msgfmt`) available at
-/// wxWidgets build time.
+/// Use the macro once, at module level, in an app crate that depends on `wxdragon` and on `patois`
+/// with the `wx` feature. The crate's build script must call `patois_build::compile_translations`,
+/// which gives this macro the build profile that it needs to find the catalogs.
+///
+/// If the catalogs don't exist, for example because wxWidgets was built without `msgfmt`, the
+/// macro embeds nothing and stock strings stay in English.
+///
+/// # Panics
+///
+/// Stops compilation with an error if a catalog can't be read, or if Cargo didn't set
+/// `CARGO_MANIFEST_DIR`.
 #[proc_macro]
 pub fn embed_wx_translations(_input: TokenStream) -> TokenStream {
 	let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set during macro expansion");
 	let app_langs = shipped_languages(Path::new(&manifest_dir));
-	let mut catalogs: Vec<(String, PathBuf)> = Vec::new();
-	if let Some(locale_dir) = wx_locale_dir() {
-		catalogs = matching_wx_catalogs(&locale_dir, &app_langs);
-	}
+	let catalogs = wx_locale_dir().map_or_else(Vec::new, |locale_dir| matching_wx_catalogs(&locale_dir, &app_langs));
 	let file_entries = catalogs.iter().map(|(lang, mo_path)| {
 		let catalog = embedded_catalog(mo_path);
 		quote! { (#lang, #catalog) }
 	});
 	quote! {
-		/// A `TranslationsLoader` that serves wxWidgets' own embedded `wxstd` catalogs.
-		///
-		/// Generated by `patois::embed_wx_translations!()`. Zero-sized, so a fresh
-		/// instance can be handed to every `Translations` object without cost.
+		/// Serves the `wxstd` catalogs that `patois::embed_wx_translations!()` embedded.
 		pub struct WxStdCatalogLoader;
 
 		impl WxStdCatalogLoader {
 			const CATALOGS: &'static [(&'static str, &'static [u8])] = &[ #(#file_entries),* ];
 
-			/// wxWidgets requests the versioned domain (`wxstd-3.3`) first and falls back
-			/// to the unversioned `wxstd`. Match both so this stays correct across wx versions.
+			// wxWidgets asks for the versioned domain, such as `wxstd-3.3`, and then for `wxstd`.
 			fn is_wxstd_domain(domain: &str) -> bool {
 				domain == "wxstd" || domain.starts_with("wxstd-")
 			}
@@ -117,9 +121,8 @@ pub fn embed_wx_translations(_input: TokenStream) -> TokenStream {
 	.into()
 }
 
-/// The catalog at `path` as a block expression yielding its deflated bytes.
-///
-/// The `include_bytes!` is never read, so it adds nothing to the binary. It is there because cargo rebuilds a crate when a file it includes changes, and reading the catalog here in the macro is invisible to cargo.
+// The `include_bytes!` is never read, so it adds nothing to the binary. It's there because Cargo
+// rebuilds a crate when an included file changes, and can't see this macro read the catalog.
 fn embedded_catalog(path: &Path) -> TokenStream2 {
 	let path_str = path.to_string_lossy().to_string();
 	let bytes = fs::read(path).unwrap_or_else(|e| panic!("couldn't read {}: {e}", path.display()));
@@ -131,7 +134,6 @@ fn embedded_catalog(path: &Path) -> TokenStream2 {
 	}}
 }
 
-/// Languages the calling crate ships, as lowercased directory names from `<manifest_dir>/locale/`.
 fn shipped_languages(manifest_dir: &Path) -> HashSet<String> {
 	let locale_dir = manifest_dir.join("locale");
 	let mut langs = HashSet::new();
@@ -145,13 +147,11 @@ fn shipped_languages(manifest_dir: &Path) -> HashSet<String> {
 	langs
 }
 
-/// The wxdragon-sys CMake build's locale output directory for the crate currently compiling.
 fn wx_locale_dir() -> Option<PathBuf> {
 	Some(target_profile_dir()?.join("wxdragon_sys_cmake_build").join("share").join("locale"))
 }
 
-/// The `target/<profile>` directory for the crate currently compiling, derived the same way
-/// a `build.rs` would (`OUT_DIR` is `target/<profile>/build/<crate>-<hash>/out`).
+// `OUT_DIR` is `target/<profile>/build/<crate>-<hash>/out`.
 fn target_profile_dir() -> Option<PathBuf> {
 	let profile = env::var("PROFILE").ok()?;
 	if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
@@ -163,8 +163,7 @@ fn target_profile_dir() -> Option<PathBuf> {
 	out_dir.ancestors().nth(3).map(Path::to_path_buf)
 }
 
-/// Scan `locale_dir` for per-language `wxstd*.mo` catalogs, restricted to `app_langs`
-/// (case-insensitively, so e.g. wx's `pt_BR` matches an app's `pt_br`).
+// wxWidgets names a language `pt_BR` where an app may name it `pt_br`, so `app_langs` is lowercase.
 fn matching_wx_catalogs(locale_dir: &Path, app_langs: &HashSet<String>) -> Vec<(String, PathBuf)> {
 	let Ok(entries) = fs::read_dir(locale_dir) else {
 		return Vec::new();
@@ -199,8 +198,6 @@ fn matching_wx_catalogs(locale_dir: &Path, app_langs: &HashSet<String>) -> Vec<(
 mod tests {
 	use super::*;
 
-	/// A scratch directory under the system temp dir, removed on drop. Avoids pulling in a
-	/// `tempfile` dependency for a handful of filesystem-fixture tests.
 	struct ScratchDir(PathBuf);
 
 	impl ScratchDir {
@@ -234,7 +231,6 @@ mod tests {
 		let locale_dir = scratch.path().join("locale");
 		fs::create_dir_all(locale_dir.join("de")).unwrap();
 		fs::create_dir_all(locale_dir.join("pt_BR")).unwrap();
-		// A stray file (not a directory) alongside real language dirs shouldn't be picked up.
 		fs::write(locale_dir.join("README.md"), b"not a language").unwrap();
 		let langs = shipped_languages(scratch.path());
 		assert_eq!(langs, HashSet::from(["de".to_string(), "pt_br".to_string()]));
