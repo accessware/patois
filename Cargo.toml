@@ -6,7 +6,7 @@ resolver = "2"
 edition = "2024"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/trypsynth/patois"
+repository = "https://github.com/accessware/patois"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
