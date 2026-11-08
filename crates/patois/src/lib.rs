@@ -35,12 +35,28 @@ pub use patois_macros::embed_domain;
 #[cfg(feature = "wx")]
 pub use patois_macros::embed_wx_translations;
 
-/// The catalogs that [`embed_domain!`] registers for one crate.
+/// The catalogs that [`embed_domain!`] registers for one crate, generated as Rust statics so that
+/// nothing is parsed at runtime and each msgid is stored once for every locale.
 #[doc(hidden)]
 pub struct EmbeddedDomain {
 	pub name: &'static str,
-	/// The `.mo` catalog of each locale, as `msgfmt` wrote it.
-	pub files: &'static [(&'static str, &'static [u8])],
+	/// The msgid of every entry, sorted by bytes. A plural entry is listed by its singular.
+	pub msgids: &'static [&'static str],
+	pub locales: &'static [EmbeddedLocale],
+}
+
+/// One locale of an [`EmbeddedDomain`].
+#[doc(hidden)]
+pub struct EmbeddedLocale {
+	/// The name of the catalog's directory under `locale/`, such as `pt_br`.
+	pub code: &'static str,
+	/// The catalog's header, which gives its plural rule.
+	pub header: &'static str,
+	/// Every translation, one after another, with the forms of a plural one separated by `\0`.
+	pub text: &'static str,
+	/// Where the translation of each msgid starts in `text`; it ends where the next one starts, so
+	/// there is one more entry than there are msgids. An empty one has no translation.
+	pub starts: &'static [u32],
 }
 
 inventory::collect!(EmbeddedDomain);
@@ -152,7 +168,7 @@ pub fn available_locales(domain: &str) -> Vec<&'static str> {
 	inventory::iter::<EmbeddedDomain>
 		.into_iter()
 		.filter(|ed| ed.name == domain)
-		.flat_map(|ed| ed.files.iter().map(|(locale, _)| *locale))
+		.flat_map(|ed| ed.locales.iter().map(|locale| locale.code))
 		.collect()
 }
 

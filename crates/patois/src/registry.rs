@@ -1,5 +1,4 @@
 use std::{
-	borrow::Cow,
 	collections::HashMap,
 	fs::{self, File},
 	path::{Path, PathBuf},
@@ -74,7 +73,7 @@ impl Registry {
 			inventory::iter::<EmbeddedDomain>
 				.into_iter()
 				.filter(|embedded| embedded.name == domain)
-				.find_map(|embedded| embedded_catalog(embedded.files, locale))
+				.find_map(|embedded| embedded_catalog(embedded, locale))
 				.or_else(|| catalog_on_disk(self.paths.get(domain)?, domain, locale))
 		})
 	}
@@ -82,11 +81,9 @@ impl Registry {
 
 // Catalog directories keep whatever name a project gave them, such as `pt_br`, so both sides of
 // each comparison below go through `normalize_locale`.
-fn embedded_catalog(files: &[(&str, &'static [u8])], locale: &str) -> Option<Catalog> {
-	files
-		.iter()
-		.filter(|(code, _)| normalize_locale(code) == locale)
-		.find_map(|&(_, bytes)| Catalog::from_bytes(Cow::Borrowed(bytes)).ok())
+fn embedded_catalog(embedded: &'static EmbeddedDomain, locale: &str) -> Option<Catalog> {
+	let found = embedded.locales.iter().find(|embedded_locale| normalize_locale(embedded_locale.code) == locale)?;
+	Some(Catalog::baked(embedded.msgids, found))
 }
 
 fn catalog_on_disk(base: &Path, domain: &str, locale: &str) -> Option<Catalog> {
@@ -123,11 +120,13 @@ mod tests {
 	use std::env;
 
 	use super::*;
-	use crate::catalog::tests::make_mo;
+	use crate::{EmbeddedLocale, catalog::tests::make_mo};
 
-	fn embedded(msgstr: &str) -> &'static [u8] {
-		Box::leak(make_mo(&[("Hello", msgstr)]).into_boxed_slice())
-	}
+	static PORTUGUESE: EmbeddedDomain = EmbeddedDomain {
+		name: "app",
+		msgids: &["Hello"],
+		locales: &[EmbeddedLocale { code: "pt_br", header: "", text: "Olá", starts: &[0, 4] }],
+	};
 
 	#[test]
 	fn normalize_various_forms() {
@@ -146,10 +145,9 @@ mod tests {
 
 	#[test]
 	fn an_embedded_catalog_matches_whatever_its_directory_is_called() {
-		let files: [(&str, &'static [u8]); 1] = [("pt_br", embedded("Olá"))];
-		let catalog = embedded_catalog(&files, &normalize_locale("pt-BR")).unwrap();
+		let catalog = embedded_catalog(&PORTUGUESE, &normalize_locale("pt-BR")).unwrap();
 		assert_eq!(catalog.gettext("Hello"), "Olá");
-		assert!(embedded_catalog(&files, "de").is_none());
+		assert!(embedded_catalog(&PORTUGUESE, "de").is_none());
 	}
 
 	#[test]

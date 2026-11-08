@@ -13,26 +13,31 @@ use proc_macro::TokenStream;
 use proc_macro2::{Literal, TokenStream as TokenStream2};
 use quote::quote;
 
+mod bake;
+
 /// Embeds the compiled catalogs of the calling crate in the binary.
 ///
 /// Reads every `<crate_root>/locale/<lang>/LC_MESSAGES/<crate_name>.mo` file at compile time. Use
 /// the macro once, at module level, in the app crate. Generate the files in a build script with
 /// `patois_build::compile_translations`, so that they exist when the macro runs.
 ///
-/// The catalogs are stored as `msgfmt` wrote them and read where they lie, so nothing is
-/// decompressed or copied, and a language that isn't used is never read. Compressing them here
-/// would only make the installer or archive, which compresses the whole binary, do worse.
+/// The catalogs are written out as Rust statics: one sorted list of msgids that every locale
+/// shares, and for each locale its translations in one string with where each one starts. Nothing
+/// is parsed, checked or copied at runtime, and each msgid is stored once rather than once per
+/// locale. Nothing is compressed either, since the installer or archive compresses the whole
+/// binary, and does it better.
 ///
 /// # Panics
 ///
-/// Stops compilation with an error if a catalog can't be read, or if Cargo didn't set
-/// `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`.
+/// Stops compilation with an error if a catalog can't be read or isn't a valid `.mo` file, or if
+/// Cargo didn't set `CARGO_MANIFEST_DIR` and `CARGO_PKG_NAME`.
 #[proc_macro]
 pub fn embed_domain(_input: TokenStream) -> TokenStream {
 	let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set during macro expansion");
 	let pkg_name = env::var("CARGO_PKG_NAME").expect("CARGO_PKG_NAME not set during macro expansion");
 	let locale_dir = Path::new(&manifest_dir).join("locale");
-	let mut file_entries = vec![];
+	let mut catalogs = vec![];
+	let mut tracked = vec![];
 	if locale_dir.exists()
 		&& let Ok(entries) = fs::read_dir(&locale_dir)
 	{
@@ -42,20 +47,38 @@ pub fn embed_domain(_input: TokenStream) -> TokenStream {
 			let locale_name = entry.file_name().to_string_lossy().to_string();
 			let mo_path = entry.path().join("LC_MESSAGES").join(format!("{pkg_name}.mo"));
 			if mo_path.exists() {
-				let catalog = embedded_catalog(&mo_path);
-				file_entries.push(quote! { (#locale_name, #catalog) });
+				let bytes = fs::read(&mo_path).unwrap_or_else(|e| panic!("couldn't read {}: {e}", mo_path.display()));
+				catalogs.push((locale_name, bytes));
+				tracked.push(rebuild_when_changed(&mo_path));
 			}
 		}
 	}
+	let baked = bake::bake(&catalogs).unwrap_or_else(|e| panic!("{e}"));
+	let msgids = &baked.msgids;
+	let locales = baked.locales.iter().map(|locale| {
+		let (code, header, text, starts) = (&locale.code, &locale.header, &locale.text, &locale.starts);
+		quote! {
+			::patois::EmbeddedLocale { code: #code, header: #header, text: #text, starts: &[ #(#starts),* ] }
+		}
+	});
 	quote! {
+		#(#tracked)*
 		::patois::inventory::submit! {
 			::patois::EmbeddedDomain {
 				name: env!("CARGO_PKG_NAME"),
-				files: &[ #(#file_entries),* ],
+				msgids: &[ #(#msgids),* ],
+				locales: &[ #(#locales),* ],
 			}
 		}
 	}
 	.into()
+}
+
+// The `include_bytes!` is never read, so it adds nothing to the binary. It's there because Cargo
+// rebuilds a crate when an included file changes, and can't see this macro read the catalog.
+fn rebuild_when_changed(path: &Path) -> TokenStream2 {
+	let path_str = path.to_string_lossy().to_string();
+	quote! { const _: &[u8] = include_bytes!(#path_str); }
 }
 
 /// Embeds the `wxstd` catalogs of wxWidgets for the languages that the calling crate ships, and

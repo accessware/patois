@@ -5,23 +5,22 @@ use std::{
 	str,
 };
 
-use crate::plural::PluralRule;
+use crate::{EmbeddedLocale, plural::PluralRule};
 
 const MAGIC_LE: u32 = 0x9504_12DE;
 const MAGIC_BE: u32 = 0xDE12_0495;
 
-/// A `.mo` catalog read where it lies, so an embedded one is never copied: lookups binary-search
-/// its table of original strings and return slices of it.
+/// The translations of one locale, and the rule that picks a plural form.
 pub struct Catalog {
-	data: Cow<'static, [u8]>,
-	little_endian: bool,
-	count: usize,
-	originals: usize,
-	translations: usize,
-	/// The entries in order of their original strings, for a file whose table isn't sorted.
-	/// `msgfmt` always sorts it, so this is normally `None`.
-	order: Option<Box<[u32]>>,
+	source: Source,
 	plural_rule: Option<PluralRule>,
+}
+
+enum Source {
+	/// Embedded by `embed_domain!` as Rust statics, so nothing is parsed or checked at runtime.
+	Baked { msgids: &'static [&'static str], locale: &'static EmbeddedLocale },
+	/// A `.mo` file from disk.
+	Mo(MoFile),
 }
 
 impl Catalog {
@@ -32,7 +31,14 @@ impl Catalog {
 	}
 
 	pub fn from_bytes(data: Cow<'static, [u8]>) -> io::Result<Self> {
-		Self::new(data).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid .mo file"))
+		let mo = MoFile::new(data).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid .mo file"))?;
+		let plural_rule = mo.header().and_then(PluralRule::parse_from_header);
+		Ok(Self { source: Source::Mo(mo), plural_rule })
+	}
+
+	/// `msgids` is the domain's sorted list, which every locale's `starts` follows.
+	pub fn baked(msgids: &'static [&'static str], locale: &'static EmbeddedLocale) -> Self {
+		Self { source: Source::Baked { msgids, locale }, plural_rule: PluralRule::parse_from_header(locale.header) }
 	}
 
 	pub fn gettext<'a>(&'a self, key: &'a str) -> &'a str {
@@ -49,6 +55,39 @@ impl Catalog {
 		forms.clone().nth(index.min(last)).unwrap_or(english)
 	}
 
+	/// The translated forms of `key`, leaving out empty ones, or `None` when it has none.
+	fn forms(&self, key: &str) -> Option<impl Iterator<Item = &str> + Clone> {
+		if key.is_empty() {
+			return None;
+		}
+		let translation = match &self.source {
+			Source::Baked { msgids, locale } => {
+				let i = msgids.binary_search(&key).ok()?;
+				let (start, end) = (*locale.starts.get(i)? as usize, *locale.starts.get(i + 1)? as usize);
+				locale.text.get(start..end)?
+			}
+			Source::Mo(mo) => text(mo.translation(mo.find(key)?)?),
+		};
+		let forms = translation.split('\0').filter(|form| !form.is_empty());
+		forms.clone().next()?;
+		Some(forms)
+	}
+}
+
+/// A `.mo` file read where it lies: lookups binary-search its table of original strings and
+/// return slices of it.
+struct MoFile {
+	data: Cow<'static, [u8]>,
+	little_endian: bool,
+	count: usize,
+	originals: usize,
+	translations: usize,
+	/// The entries in order of their original strings, for a file whose table isn't sorted.
+	/// `msgfmt` always sorts it, so this is normally `None`.
+	order: Option<Box<[u32]>>,
+}
+
+impl MoFile {
 	fn new(data: Cow<'static, [u8]>) -> Option<Self> {
 		let magic = u32::from_le_bytes(data.get(0..4)?.try_into().ok()?);
 		let little_endian = match magic {
@@ -56,26 +95,27 @@ impl Catalog {
 			MAGIC_BE => false,
 			_ => return None,
 		};
-		let mut catalog =
-			Self { data, little_endian, count: 0, originals: 0, translations: 0, order: None, plural_rule: None };
-		catalog.count = catalog.u32_at(8)? as usize;
-		catalog.originals = catalog.u32_at(12)? as usize;
-		catalog.translations = catalog.u32_at(16)? as usize;
+		let mut mo = Self { data, little_endian, count: 0, originals: 0, translations: 0, order: None };
+		mo.count = mo.u32_at(8)? as usize;
+		mo.originals = mo.u32_at(12)? as usize;
+		mo.translations = mo.u32_at(16)? as usize;
 		// Every entry is checked once here, so a lookup can't fail on a bad offset or bad UTF-8.
-		for i in 0..catalog.count {
-			str::from_utf8(catalog.original(i)?).ok()?;
-			str::from_utf8(catalog.translation(i)?).ok()?;
+		for i in 0..mo.count {
+			str::from_utf8(mo.original(i)?).ok()?;
+			str::from_utf8(mo.translation(i)?).ok()?;
 		}
-		let sorted = (1..catalog.count).all(|i| catalog.original(i - 1) <= catalog.original(i));
+		let sorted = (1..mo.count).all(|i| mo.original(i - 1) <= mo.original(i));
 		if !sorted {
-			let mut order: Vec<u32> = (0..u32::try_from(catalog.count).ok()?).collect();
-			order.sort_by(|&a, &b| catalog.original(a as usize).cmp(&catalog.original(b as usize)));
-			catalog.order = Some(order.into_boxed_slice());
+			let mut order: Vec<u32> = (0..u32::try_from(mo.count).ok()?).collect();
+			order.sort_by(|&a, &b| mo.original(a as usize).cmp(&mo.original(b as usize)));
+			mo.order = Some(order.into_boxed_slice());
 		}
-		// The header is the entry whose original is empty.
-		let header = catalog.find("").and_then(|i| catalog.translation(i)).map(text);
-		catalog.plural_rule = header.and_then(PluralRule::parse_from_header);
-		Some(catalog)
+		Some(mo)
+	}
+
+	/// The header is the entry whose original is empty.
+	fn header(&self) -> Option<&str> {
+		self.find("").and_then(|i| self.translation(i)).map(text)
 	}
 
 	fn u32_at(&self, pos: usize) -> Option<u32> {
@@ -115,20 +155,9 @@ impl Catalog {
 		}
 		None
 	}
-
-	/// The translated forms of `key`, leaving out empty ones, or `None` when it has none.
-	fn forms(&self, key: &str) -> Option<impl Iterator<Item = &str> + Clone> {
-		if key.is_empty() {
-			return None;
-		}
-		let translation = text(self.translation(self.find(key)?)?);
-		let forms = translation.split('\0').filter(|form| !form.is_empty());
-		forms.clone().next()?;
-		Some(forms)
-	}
 }
 
-// `Catalog::new` checked every string, so this never falls back.
+// `MoFile::new` checked every string, so this never falls back.
 fn text(bytes: &[u8]) -> &str {
 	str::from_utf8(bytes).unwrap_or_default()
 }
@@ -216,7 +245,7 @@ pub mod tests {
 	fn an_unsorted_catalog_is_still_searched() {
 		let mo = make_mo(&[("Zebra", "Zèbre"), ("Apple", "Pomme"), ("Mango", "Mangue")]);
 		let cat = Catalog::parse(Cursor::new(mo)).unwrap();
-		assert!(cat.order.is_some());
+		assert!(matches!(&cat.source, Source::Mo(mo) if mo.order.is_some()));
 		assert_eq!(cat.gettext("Apple"), "Pomme");
 		assert_eq!(cat.gettext("Mango"), "Mangue");
 		assert_eq!(cat.gettext("Zebra"), "Zèbre");
@@ -224,11 +253,33 @@ pub mod tests {
 	}
 
 	#[test]
-	fn an_embedded_catalog_is_read_where_it_lies() {
+	fn a_borrowed_mo_file_is_read_where_it_lies() {
 		let mo: &'static [u8] = Box::leak(make_mo(&[("Hello", "Hallo")]).into_boxed_slice());
 		let cat = Catalog::from_bytes(Cow::Borrowed(mo)).unwrap();
-		assert!(cat.order.is_none());
+		assert!(matches!(&cat.source, Source::Mo(mo) if mo.order.is_none()));
 		assert_eq!(cat.gettext("Hello").as_ptr(), mo[mo.len() - "Hallo".len() - 1..].as_ptr());
+	}
+
+	/// Laid out as `embed_domain!` generates it: "Open" has no translation in this locale.
+	static MSGIDS: [&str; 4] = ["Close", "Open", "Save", "file"];
+	static GERMAN: EmbeddedLocale = EmbeddedLocale {
+		code: "de",
+		header: "Plural-Forms: nplurals=2; plural=(n != 1);\n",
+		text: "SchließenSpeichernDatei\0Dateien",
+		// "Schließen" is 10 bytes, since ß takes two.
+		starts: &[0, 10, 10, 19, 32],
+	};
+
+	#[test]
+	fn a_baked_catalog_finds_each_translation_by_its_place_in_the_shared_msgids() {
+		let cat = Catalog::baked(&MSGIDS, &GERMAN);
+		assert_eq!(cat.gettext("Close"), "Schließen");
+		assert_eq!(cat.gettext("Save"), "Speichern");
+		assert_eq!(cat.gettext("Open"), "Open", "a msgid only another locale translates");
+		assert_eq!(cat.gettext("Print"), "Print", "a msgid no locale has");
+		assert_eq!(cat.ngettext("file", "files", 1), "Datei");
+		assert_eq!(cat.ngettext("file", "files", 4), "Dateien");
+		assert_eq!(cat.gettext(""), "");
 	}
 
 	#[test]

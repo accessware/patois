@@ -7,7 +7,7 @@ Libraries can mark their strings too. A library calls `t()` and needs no setup o
 ## Features
 
 - Plain gettext files, which work with existing tools such as [Poedit](https://poedit.net/).
-- Catalogs embedded in the binary as `msgfmt` wrote them, and read in place: nothing is decompressed or copied, and a language that isn't used is never read.
+- Catalogs embedded in the binary as Rust statics, with each msgid stored once for every language. Nothing is parsed, decompressed or copied at runtime, and a language that isn't used is never read.
 - Selection of the language that best fits the system. For example, a system set to `zh-Hans-CN` finds a catalog named `zh_CN`.
 - Plural forms that follow each language's own rules.
 - Optional [wxDragon](https://github.com/AllenDang/wxDragon) integration, which translates the stock strings of wxWidgets along with your own.
