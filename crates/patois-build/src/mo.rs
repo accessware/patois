@@ -60,8 +60,9 @@ pub fn compile_translations(po_dir: impl AsRef<Path>, locale_dir: impl AsRef<Pat
 fn run_msgfmt(input: &Path, output: &Path) {
 	// `fuzzy` marks a machine translation that no person has reviewed, as `PoDocument::apply`
 	// writes it. msgfmt drops fuzzy entries by default, and these would then never reach the
-	// app.
-	match Command::new("msgfmt").arg("--use-fuzzy").arg(input).arg("-o").arg(output).status() {
+	// app. The hash table only speeds up GNU gettext's own lookup; patois binary-searches the
+	// sorted strings, so the table would only take up space in the binary.
+	match Command::new("msgfmt").arg("--use-fuzzy").arg("--no-hash").arg(input).arg("-o").arg(output).status() {
 		Ok(s) if s.success() => {}
 		Ok(s) => println!("cargo:warning=patois-build: msgfmt exited with {s} compiling {}", input.display()),
 		Err(e) => println!("cargo:warning=patois-build: msgfmt not available ({e}); install gettext tools"),

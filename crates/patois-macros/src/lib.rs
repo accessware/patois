@@ -19,8 +19,9 @@ use quote::quote;
 /// the macro once, at module level, in the app crate. Generate the files in a build script with
 /// `patois_build::compile_translations`, so that they exist when the macro runs.
 ///
-/// The catalogs are stored deflated, and each one is inflated only when its locale is first used,
-/// so a binary with many languages holds one of them in memory at a time.
+/// The catalogs are stored as `msgfmt` wrote them and read where they lie, so nothing is
+/// decompressed or copied, and a language that isn't used is never read. Compressing them here
+/// would only make the installer or archive, which compresses the whole binary, do worse.
 ///
 /// # Panics
 ///
@@ -106,8 +107,7 @@ pub fn embed_wx_translations(_input: TokenStream) -> TokenStream {
 				Self::CATALOGS
 					.iter()
 					.find(|(l, _)| l.eq_ignore_ascii_case(lang))
-					.and_then(|(_, bytes)| ::patois::__inflate(bytes))
-					.map(::std::borrow::Cow::Owned)
+					.map(|&(_, bytes)| ::std::borrow::Cow::Borrowed(bytes))
 			}
 
 			fn available_translations(&self, domain: &str) -> ::std::vec::Vec<::std::string::String> {
@@ -126,10 +126,10 @@ pub fn embed_wx_translations(_input: TokenStream) -> TokenStream {
 fn embedded_catalog(path: &Path) -> TokenStream2 {
 	let path_str = path.to_string_lossy().to_string();
 	let bytes = fs::read(path).unwrap_or_else(|e| panic!("couldn't read {}: {e}", path.display()));
-	let deflated = Literal::byte_string(&miniz_oxide::deflate::compress_to_vec(&bytes, 10));
+	let bytes = Literal::byte_string(&bytes);
 	quote! {{
 		const _: &[u8] = include_bytes!(#path_str);
-		const B: &[u8] = #deflated;
+		const B: &[u8] = #bytes;
 		B
 	}}
 }

@@ -1,6 +1,6 @@
 [package]
 name = "patois-build"
-version = "0.1.18"
+version = "0.1.19"
 description = "Gettext tooling for patois apps: extract strings from Rust, Swift, and Kotlin, compile .po catalogs, generate iOS and Android assets, and check translations for common mistakes."
 edition.workspace = true
 license.workspace = true

@@ -1,5 +1,6 @@
 use std::{
-	collections::HashMap,
+	borrow::Cow,
+	cmp::Ordering,
 	io::{self, Read},
 	str,
 };
@@ -9,8 +10,17 @@ use crate::plural::PluralRule;
 const MAGIC_LE: u32 = 0x9504_12DE;
 const MAGIC_BE: u32 = 0xDE12_0495;
 
+/// A `.mo` catalog read where it lies, so an embedded one is never copied: lookups binary-search
+/// its table of original strings and return slices of it.
 pub struct Catalog {
-	translations: HashMap<String, Vec<String>>,
+	data: Cow<'static, [u8]>,
+	little_endian: bool,
+	count: usize,
+	originals: usize,
+	translations: usize,
+	/// The entries in order of their original strings, for a file whose table isn't sorted.
+	/// `msgfmt` always sorts it, so this is normally `None`.
+	order: Option<Box<[u32]>>,
 	plural_rule: Option<PluralRule>,
 }
 
@@ -18,67 +28,109 @@ impl Catalog {
 	pub fn parse(mut reader: impl Read) -> io::Result<Self> {
 		let mut data = Vec::new();
 		reader.read_to_end(&mut data)?;
-		parse_mo(&data).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid .mo file"))
+		Self::from_bytes(Cow::Owned(data))
+	}
+
+	pub fn from_bytes(data: Cow<'static, [u8]>) -> io::Result<Self> {
+		Self::new(data).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid .mo file"))
 	}
 
 	pub fn gettext<'a>(&'a self, key: &'a str) -> &'a str {
-		self.translations.get(key).and_then(|forms| forms.first()).map_or(key, String::as_str)
+		self.forms(key).and_then(|mut forms| forms.next()).unwrap_or(key)
 	}
 
 	pub fn ngettext<'a>(&'a self, singular: &'a str, plural: &'a str, n: u64) -> &'a str {
 		let english = if n == 1 { singular } else { plural };
-		let Some(forms) = self.translations.get(singular) else {
+		let Some(forms) = self.forms(singular) else {
 			return english;
 		};
-		let last = forms.len().saturating_sub(1);
+		let last = forms.clone().count().saturating_sub(1);
 		let index = self.plural_rule.as_ref().map_or_else(|| usize::from(n != 1), |rule| rule.index_for(n));
-		forms.get(index.min(last)).map_or(english, String::as_str)
+		forms.clone().nth(index.min(last)).unwrap_or(english)
+	}
+
+	fn new(data: Cow<'static, [u8]>) -> Option<Self> {
+		let magic = u32::from_le_bytes(data.get(0..4)?.try_into().ok()?);
+		let little_endian = match magic {
+			MAGIC_LE => true,
+			MAGIC_BE => false,
+			_ => return None,
+		};
+		let mut catalog =
+			Self { data, little_endian, count: 0, originals: 0, translations: 0, order: None, plural_rule: None };
+		catalog.count = catalog.u32_at(8)? as usize;
+		catalog.originals = catalog.u32_at(12)? as usize;
+		catalog.translations = catalog.u32_at(16)? as usize;
+		// Every entry is checked once here, so a lookup can't fail on a bad offset or bad UTF-8.
+		for i in 0..catalog.count {
+			str::from_utf8(catalog.original(i)?).ok()?;
+			str::from_utf8(catalog.translation(i)?).ok()?;
+		}
+		let sorted = (1..catalog.count).all(|i| catalog.original(i - 1) <= catalog.original(i));
+		if !sorted {
+			let mut order: Vec<u32> = (0..u32::try_from(catalog.count).ok()?).collect();
+			order.sort_by(|&a, &b| catalog.original(a as usize).cmp(&catalog.original(b as usize)));
+			catalog.order = Some(order.into_boxed_slice());
+		}
+		// The header is the entry whose original is empty.
+		let header = catalog.find("").and_then(|i| catalog.translation(i)).map(text);
+		catalog.plural_rule = header.and_then(PluralRule::parse_from_header);
+		Some(catalog)
+	}
+
+	fn u32_at(&self, pos: usize) -> Option<u32> {
+		let bytes: [u8; 4] = self.data.get(pos..pos.checked_add(4)?)?.try_into().ok()?;
+		Some(if self.little_endian { u32::from_le_bytes(bytes) } else { u32::from_be_bytes(bytes) })
+	}
+
+	fn string(&self, table: usize, i: usize) -> Option<&[u8]> {
+		let entry = table.checked_add(i.checked_mul(8)?)?;
+		let len = self.u32_at(entry)? as usize;
+		let offset = self.u32_at(entry + 4)? as usize;
+		self.data.get(offset..offset.checked_add(len)?)
+	}
+
+	fn original(&self, i: usize) -> Option<&[u8]> {
+		self.string(self.originals, i)
+	}
+
+	fn translation(&self, i: usize) -> Option<&[u8]> {
+		self.string(self.translations, i)
+	}
+
+	/// The entry whose singular is `key`. A plural entry's original is "singular\0plural", and
+	/// sorting by the whole original sorts by the singular too, because no byte is below `\0`.
+	fn find(&self, key: &str) -> Option<usize> {
+		let entry = |position: usize| self.order.as_ref().map_or(position, |order| order[position] as usize);
+		let (mut low, mut high) = (0, self.count);
+		while low < high {
+			let middle = low + (high - low) / 2;
+			let original = self.original(entry(middle))?;
+			let singular = original.split(|&b| b == 0).next().unwrap_or(original);
+			match singular.cmp(key.as_bytes()) {
+				Ordering::Less => low = middle + 1,
+				Ordering::Greater => high = middle,
+				Ordering::Equal => return Some(entry(middle)),
+			}
+		}
+		None
+	}
+
+	/// The translated forms of `key`, leaving out empty ones, or `None` when it has none.
+	fn forms(&self, key: &str) -> Option<impl Iterator<Item = &str> + Clone> {
+		if key.is_empty() {
+			return None;
+		}
+		let translation = text(self.translation(self.find(key)?)?);
+		let forms = translation.split('\0').filter(|form| !form.is_empty());
+		forms.clone().next()?;
+		Some(forms)
 	}
 }
 
-fn parse_mo(data: &[u8]) -> Option<Catalog> {
-	if data.len() < 28 {
-		return None;
-	}
-	let magic = u32::from_le_bytes(data[0..4].try_into().ok()?);
-	let le = match magic {
-		MAGIC_LE => true,
-		MAGIC_BE => false,
-		_ => return None,
-	};
-	let u32_at = |pos: usize| -> Option<u32> {
-		let bytes: [u8; 4] = data.get(pos..pos + 4)?.try_into().ok()?;
-		Some(if le { u32::from_le_bytes(bytes) } else { u32::from_be_bytes(bytes) })
-	};
-	let n = u32_at(8)? as usize;
-	let orig_table = u32_at(12)? as usize;
-	let trans_table = u32_at(16)? as usize;
-	let mut translations: HashMap<String, Vec<String>> = HashMap::with_capacity(n);
-	let mut plural_rule = None;
-	for i in 0..n {
-		let orig_len = u32_at(orig_table + i * 8)? as usize;
-		let orig_off = u32_at(orig_table + i * 8 + 4)? as usize;
-		let trans_len = u32_at(trans_table + i * 8)? as usize;
-		let trans_off = u32_at(trans_table + i * 8 + 4)? as usize;
-		let key_bytes = data.get(orig_off..orig_off + orig_len)?;
-		let val_bytes = data.get(trans_off..trans_off + trans_len)?;
-		let key = str::from_utf8(key_bytes).ok()?;
-		let val = str::from_utf8(val_bytes).ok()?;
-		// A plural entry's key is "singular\0plural" and its value is "form0\0form1\0...".
-		let singular = key.split('\0').next()?;
-		if singular.is_empty() {
-			plural_rule = PluralRule::parse_from_header(val);
-			continue;
-		}
-		if val.is_empty() {
-			continue;
-		}
-		let forms: Vec<String> = val.split('\0').filter(|s| !s.is_empty()).map(String::from).collect();
-		if !forms.is_empty() {
-			translations.insert(singular.to_string(), forms);
-		}
-	}
-	Some(Catalog { translations, plural_rule })
+// `Catalog::new` checked every string, so this never falls back.
+fn text(bytes: &[u8]) -> &str {
+	str::from_utf8(bytes).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -158,6 +210,49 @@ pub mod tests {
 		assert_eq!(cat.ngettext("apple", "apples", 2), "few");
 		assert_eq!(cat.ngettext("apple", "apples", 5), "many");
 		assert_eq!(cat.ngettext("apple", "apples", 11), "many");
+	}
+
+	#[test]
+	fn an_unsorted_catalog_is_still_searched() {
+		let mo = make_mo(&[("Zebra", "Zèbre"), ("Apple", "Pomme"), ("Mango", "Mangue")]);
+		let cat = Catalog::parse(Cursor::new(mo)).unwrap();
+		assert!(cat.order.is_some());
+		assert_eq!(cat.gettext("Apple"), "Pomme");
+		assert_eq!(cat.gettext("Mango"), "Mangue");
+		assert_eq!(cat.gettext("Zebra"), "Zèbre");
+		assert_eq!(cat.gettext("Kiwi"), "Kiwi");
+	}
+
+	#[test]
+	fn an_embedded_catalog_is_read_where_it_lies() {
+		let mo: &'static [u8] = Box::leak(make_mo(&[("Hello", "Hallo")]).into_boxed_slice());
+		let cat = Catalog::from_bytes(Cow::Borrowed(mo)).unwrap();
+		assert!(cat.order.is_none());
+		assert_eq!(cat.gettext("Hello").as_ptr(), mo[mo.len() - "Hallo".len() - 1..].as_ptr());
+	}
+
+	#[test]
+	fn an_empty_translation_leaves_the_english() {
+		let mo = make_mo(&[("Hello", ""), ("item\0items", "\0")]);
+		let cat = Catalog::parse(Cursor::new(mo)).unwrap();
+		assert_eq!(cat.gettext("Hello"), "Hello");
+		assert_eq!(cat.ngettext("item", "items", 2), "items");
+	}
+
+	#[test]
+	fn a_plural_entry_is_found_by_its_singular_beside_a_longer_one() {
+		let mo = make_mo(&[("file\0files", "fichier\0fichiers"), ("file name", "nom de fichier")]);
+		let cat = Catalog::parse(Cursor::new(mo)).unwrap();
+		assert_eq!(cat.ngettext("file", "files", 3), "fichiers");
+		assert_eq!(cat.gettext("file name"), "nom de fichier");
+	}
+
+	#[test]
+	fn a_truncated_catalog_is_rejected() {
+		let mut mo = make_mo(&[("Hello", "Hallo")]);
+		mo.truncate(mo.len() - 3);
+		assert!(Catalog::parse(Cursor::new(mo)).is_err());
+		assert!(Catalog::parse(Cursor::new(vec![0xDE, 0x12])).is_err());
 	}
 
 	#[test]

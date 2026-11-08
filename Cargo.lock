@@ -796,10 +796,9 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "patois"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "inventory",
- "miniz_oxide",
  "patois-macros",
  "sys-locale",
  "wxdragon",
@@ -807,16 +806,15 @@ dependencies = [
 
 [[package]]
 name = "patois-build"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "patois-macros"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
- "miniz_oxide",
  "proc-macro2",
  "quote",
 ]

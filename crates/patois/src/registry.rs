@@ -1,4 +1,5 @@
 use std::{
+	borrow::Cow,
 	collections::HashMap,
 	fs::{self, File},
 	path::{Path, PathBuf},
@@ -81,11 +82,11 @@ impl Registry {
 
 // Catalog directories keep whatever name a project gave them, such as `pt_br`, so both sides of
 // each comparison below go through `normalize_locale`.
-fn embedded_catalog(files: &[(&str, &[u8])], locale: &str) -> Option<Catalog> {
+fn embedded_catalog(files: &[(&str, &'static [u8])], locale: &str) -> Option<Catalog> {
 	files
 		.iter()
 		.filter(|(code, _)| normalize_locale(code) == locale)
-		.find_map(|(_, deflated)| Catalog::parse(crate::__inflate(deflated)?.as_slice()).ok())
+		.find_map(|&(_, bytes)| Catalog::from_bytes(Cow::Borrowed(bytes)).ok())
 }
 
 fn catalog_on_disk(base: &Path, domain: &str, locale: &str) -> Option<Catalog> {
@@ -124,8 +125,8 @@ mod tests {
 	use super::*;
 	use crate::catalog::tests::make_mo;
 
-	fn deflated_catalog(msgstr: &str) -> Vec<u8> {
-		miniz_oxide::deflate::compress_to_vec(&make_mo(&[("Hello", msgstr)]), 10)
+	fn embedded(msgstr: &str) -> &'static [u8] {
+		Box::leak(make_mo(&[("Hello", msgstr)]).into_boxed_slice())
 	}
 
 	#[test]
@@ -137,19 +138,6 @@ mod tests {
 	}
 
 	#[test]
-	fn inflate_undoes_the_macros_deflate() {
-		let catalog = b"msgid and msgstr bytes ".repeat(20);
-		assert_eq!(crate::__inflate(&miniz_oxide::deflate::compress_to_vec(&catalog, 10)), Some(catalog));
-	}
-
-	// A `.mo` file opens with a magic number that isn't a valid deflate stream, so an undeflated
-	// catalog is skipped rather than misread.
-	#[test]
-	fn inflate_rejects_a_catalog_that_was_never_deflated() {
-		assert_eq!(crate::__inflate(b"\xDE\x12\x04\x95"), None);
-	}
-
-	#[test]
 	fn locale_chain_expands_region() {
 		assert_eq!(locale_chain("de_DE"), vec!["de_DE", "de"]);
 		assert_eq!(locale_chain("fr"), vec!["fr"]);
@@ -158,8 +146,7 @@ mod tests {
 
 	#[test]
 	fn an_embedded_catalog_matches_whatever_its_directory_is_called() {
-		let deflated = deflated_catalog("Olá");
-		let files: [(&str, &[u8]); 1] = [("pt_br", &deflated)];
+		let files: [(&str, &'static [u8]); 1] = [("pt_br", embedded("Olá"))];
 		let catalog = embedded_catalog(&files, &normalize_locale("pt-BR")).unwrap();
 		assert_eq!(catalog.gettext("Hello"), "Olá");
 		assert!(embedded_catalog(&files, "de").is_none());

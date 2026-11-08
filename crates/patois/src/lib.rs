@@ -39,7 +39,7 @@ pub use patois_macros::embed_wx_translations;
 #[doc(hidden)]
 pub struct EmbeddedDomain {
 	pub name: &'static str,
-	/// The deflated `.mo` catalog of each locale.
+	/// The `.mo` catalog of each locale, as `msgfmt` wrote it.
 	pub files: &'static [(&'static str, &'static [u8])],
 }
 
@@ -162,11 +162,4 @@ pub fn available_locales(domain: &str) -> Vec<&'static str> {
 #[must_use]
 pub fn system_locale() -> String {
 	sys_locale::get_locale().map_or_else(|| "en".to_string(), |l| registry::normalize_locale(&l))
-}
-
-// Public only because the output of `embed_wx_translations!` calls it.
-#[doc(hidden)]
-#[must_use]
-pub fn __inflate(deflated: &[u8]) -> Option<Vec<u8>> {
-	miniz_oxide::inflate::decompress_to_vec(deflated).ok()
 }
