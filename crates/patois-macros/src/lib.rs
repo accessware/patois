@@ -171,19 +171,31 @@ fn shipped_languages(manifest_dir: &Path) -> HashSet<String> {
 }
 
 fn wx_locale_dir() -> Option<PathBuf> {
-	Some(target_profile_dir()?.join("wxdragon_sys_cmake_build").join("share").join("locale"))
+	let var = |name| env::var_os(name).map(PathBuf::from);
+	locale_dir_from(var("WXDRAGON_SYS_BUILD_DIR"), &env::var("PROFILE").ok()?, var("OUT_DIR"), var("CARGO_TARGET_DIR"))
 }
 
-// `OUT_DIR` is `target/<profile>/build/<crate>-<hash>/out`.
-fn target_profile_dir() -> Option<PathBuf> {
-	let profile = env::var("PROFILE").ok()?;
-	if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
-		let mut dir = PathBuf::from(target_dir);
-		dir.push(profile);
-		return Some(dir);
-	}
-	let out_dir = PathBuf::from(env::var("OUT_DIR").ok()?);
-	out_dir.ancestors().nth(3).map(Path::to_path_buf)
+// Where wxdragon-sys builds: `WXDRAGON_SYS_BUILD_DIR` when it's set, else the profile directory it
+// finds from `OUT_DIR`, `target/<profile>/build/<crate>-<hash>/out` or, for a cross build,
+// `target/<triple>/<profile>/...`. `CARGO_TARGET_DIR` is only the fallback, since it leaves out the
+// triple. The result is absolute, since `include_bytes!` reads a relative path from the source
+// file, not from where the compiler runs as `fs::read` does.
+fn locale_dir_from(
+	build_dir: Option<PathBuf>,
+	profile: &str,
+	out_dir: Option<PathBuf>,
+	target_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+	let build_dir = build_dir.or_else(|| {
+		let profile_dir = match out_dir {
+			Some(out_dir) => {
+				out_dir.ancestors().find(|dir| dir.file_name().is_some_and(|name| name == profile))?.to_path_buf()
+			}
+			None => target_dir?.join(profile),
+		};
+		Some(profile_dir.join("wxdragon_sys_cmake_build"))
+	})?;
+	std::path::absolute(build_dir.join("share").join("locale")).ok()
 }
 
 // wxWidgets names a language `pt_BR` where an app may name it `pt_br`, so `app_langs` is lowercase.
@@ -246,6 +258,44 @@ mod tests {
 		let lc_messages = dir.join(lang).join("LC_MESSAGES");
 		fs::create_dir_all(&lc_messages).expect("create LC_MESSAGES dir");
 		fs::write(lc_messages.join(filename), b"fake mo bytes").expect("write fake .mo file");
+	}
+
+	fn locale_under(dir: &Path) -> PathBuf {
+		dir.join("wxdragon_sys_cmake_build").join("share").join("locale")
+	}
+
+	#[test]
+	fn the_catalogs_are_found_beside_the_build_out_dir_names() {
+		let target = env::temp_dir().join("target");
+		let out_dir = target.join("release").join("build").join("app-1234").join("out");
+		let found = locale_dir_from(None, "release", Some(out_dir), None);
+		assert_eq!(found, Some(locale_under(&target.join("release"))));
+	}
+
+	#[test]
+	fn a_cross_build_keeps_its_target_triple() {
+		let target = env::temp_dir().join("target");
+		let profile = target.join("aarch64-pc-windows-msvc").join("release");
+		let out_dir = profile.join("build").join("app-1234").join("out");
+		// `CARGO_TARGET_DIR` leaves the triple out, so it mustn't win over `OUT_DIR`.
+		let found = locale_dir_from(None, "release", Some(out_dir), Some(target));
+		assert_eq!(found, Some(locale_under(&profile)));
+	}
+
+	#[test]
+	fn a_relative_target_dir_becomes_absolute() {
+		let found = locale_dir_from(None, "debug", None, Some(PathBuf::from("target").join("udeps")))
+			.expect("a locale directory");
+		assert!(found.is_absolute(), "{}", found.display());
+		assert!(found.ends_with(locale_under(&Path::new("target").join("udeps").join("debug"))));
+	}
+
+	#[test]
+	fn wxdragon_sys_build_dir_moves_the_catalogs_with_it() {
+		let build = env::temp_dir().join("wx-build");
+		let out_dir = env::temp_dir().join("target").join("release").join("build").join("app").join("out");
+		let found = locale_dir_from(Some(build.clone()), "release", Some(out_dir), None);
+		assert_eq!(found, Some(build.join("share").join("locale")));
 	}
 
 	#[test]
