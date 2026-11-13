@@ -272,6 +272,15 @@ mod tests {
 		assert_eq!(found, Some(locale_under(&target.join("release"))));
 	}
 
+	/// Cargo 1.100 nests `OUT_DIR` one deeper, `build/<crate>/<hash>/out`.
+	#[test]
+	fn the_catalogs_are_found_from_cargo_1_100s_out_dir() {
+		let target = env::temp_dir().join("target");
+		let out_dir = target.join("release").join("build").join("app").join("1234").join("out");
+		let found = locale_dir_from(None, "release", Some(out_dir), None);
+		assert_eq!(found, Some(locale_under(&target.join("release"))));
+	}
+
 	#[test]
 	fn a_cross_build_keeps_its_target_triple() {
 		let target = env::temp_dir().join("target");
