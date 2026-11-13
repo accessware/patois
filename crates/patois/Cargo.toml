@@ -1,6 +1,6 @@
 [package]
 name = "patois"
-version = "0.3.2"
+version = "0.3.3"
 description = "Gettext translations for Rust desktop apps: embedded catalogs, plural rules, and language selection, with optional wxDragon integration."
 edition.workspace = true
 license.workspace = true
@@ -18,7 +18,7 @@ wx = ["dep:wxdragon"]
 
 [dependencies]
 inventory = "0.3.25"
-patois-macros = { version = "=0.3.2", path = "../patois-macros" }
+patois-macros = { version = "=0.3.3", path = "../patois-macros" }
 sys-locale = "0.3.2"
 wxdragon = { version = "0.9.24", optional = true, default-features = false }
 
