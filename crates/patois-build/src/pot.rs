@@ -120,7 +120,8 @@ fn write_pot(
 	let temp_file = po_dir.join(format!("{package_name}.pot.new"));
 	let scratch = env::temp_dir().join(format!("patois-build-pot-{}", process::id()));
 	let sanitized = sanitize_files_into(&scratch, files);
-	let result = sanitized.and_then(|sources| run_xgettext(&sources, &temp_file, package_name, package_version));
+	let result =
+		sanitized.and_then(|sources| run_xgettext(&scratch, &sources, &temp_file, package_name, package_version));
 	let _ = fs::remove_dir_all(&scratch);
 	result?;
 	strip_format_flags(&temp_file)?;
@@ -139,20 +140,22 @@ fn write_pot(
 ///
 /// Each copy's name starts with its position in `files`, because two crates can each have a
 /// `main.rs`. The names never reach the pot, because of `--no-location`.
-fn sanitize_files_into(scratch: &Path, files: &[PathBuf]) -> Result<Vec<PathBuf>, Box<dyn error::Error>> {
+fn sanitize_files_into(scratch: &Path, files: &[PathBuf]) -> Result<Vec<String>, Box<dyn error::Error>> {
 	fs::create_dir_all(scratch)?;
 	let mut sources = Vec::with_capacity(files.len());
 	for (index, file) in files.iter().enumerate() {
 		let name = file.file_name().map_or_else(|| "src.rs".to_string(), |n| n.to_string_lossy().into_owned());
-		let dest = scratch.join(format!("{index:05}-{name}"));
-		fs::write(&dest, sanitize_rust::sanitize_for_xgettext(&fs::read_to_string(file)?))?;
-		sources.push(dest);
+		let copy = format!("{index:05}-{name}");
+		fs::write(scratch.join(&copy), sanitize_rust::sanitize_for_xgettext(&fs::read_to_string(file)?))?;
+		sources.push(copy);
 	}
 	Ok(sources)
 }
 
+/// `sources` are names in `scratch`.
 fn run_xgettext(
-	sources: &[PathBuf],
+	scratch: &Path,
+	sources: &[String],
 	output: &Path,
 	package_name: &str,
 	package_version: &str,
@@ -168,9 +171,16 @@ fn run_xgettext(
 		.arg(format!("--package-name={package_name}"))
 		.arg(format!("--package-version={package_version}"))
 		.arg(format!("--output={}", output.display()));
-	for source in sources {
-		cmd.arg(source);
-	}
+	// A large workspace's files, one argument each, outgrow Windows' 32,767-character command line.
+	let list = scratch.join("files.txt");
+	fs::write(
+		&list,
+		sources.join(
+			"
+",
+		),
+	)?;
+	cmd.arg(format!("--directory={}", scratch.display())).arg(format!("--files-from={}", list.display()));
 	if !cmd.status()?.success() {
 		return Err("xgettext failed".into());
 	}
